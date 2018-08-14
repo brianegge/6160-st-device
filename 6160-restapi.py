@@ -8,6 +8,8 @@ import time
 from time import localtime, strftime
 import sys
 import threading
+import thread
+import os
 
 # Init
 app = Flask(__name__)
@@ -15,6 +17,7 @@ app = Flask(__name__)
 ser = serial.serial_for_url('/dev/ttyACM0', baudrate=115200, timeout=1)
 sio = io.TextIOWrapper(io.BufferedRWPair(ser, ser))
 sio_lock = threading.Lock()
+
 def reader():
     last_time = ''
     while True:
@@ -34,7 +37,7 @@ def write(msg):
         sys.stdout.write('>>' + msg)
         sio.write(unicode(msg))
         sio.flush()
-    return msg
+    return msg, 200
 
 @app.route("/status")
 def status():    
@@ -61,4 +64,5 @@ if __name__ == "__main__":
     d = threading.Thread(name='reader', target=reader)
     d.setDaemon(True)
     d.start()
-    app.run(host='0.0.0.0', port=8282, debug=True)
+    # reloader causes problem with background reader
+    app.run(host='0.0.0.0', port=8282, debug=True, use_reloader=False)
