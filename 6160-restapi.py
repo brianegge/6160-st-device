@@ -27,7 +27,7 @@ def reader():
             if 'initialized' in line:
                 message(1, 'Raspberry Pi OK')
             continue
-        out = strftime("%Y-%m-%d %H:%M", localtime())
+        out = strftime("%a %b %e %I:%M", localtime())
         if out != last_time:
             last_time = out
             message(2, out)
@@ -43,21 +43,21 @@ def write(msg):
 def status():    
     return 'online', 200
 
-@app.route("/message/<line_no>/<text>")
+@app.route("/message/<line_no>/<text>", methods=['GET', 'POST'])
 def message(line_no, text):    
     return write('F7 {}={:<16}\n'.format(line_no, text))
 
-@app.route("/ready/<state>")
+@app.route("/ready/<state>", methods=['GET', 'POST'])
 def ready(state):    
     return write('F7 r={}\n'.format(state))
 
-@app.route("/arm-away/<state>")
+@app.route("/arm-away/<state>", methods=['GET', 'POST'])
 def arm_away(state):    
-    return write('F7 a={}\n'.format(state))
+    return write('F7 1={:<16} a={}\n'.format('Armed Away' if state == '1' else 'Disarmed', state))
 
-@app.route("/arm-stay/<state>")
+@app.route("/arm-stay/<state>", methods=['GET', 'POST'])
 def arm_stay(state):    
-    return write('F7 s={}\n'.format(state))
+    return write('F7 1={:<16} s={}\n'.format('Armed Stay' if state == '1' else 'Disarmed', state))
 
 if __name__ == "__main__":
     # start a thread to read events off the serial port

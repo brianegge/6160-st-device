@@ -15,17 +15,20 @@
  *  Credit: Eric Roberts (baldeagle072) - Virtual switch creator
  *  Credit: tguerena and surge919 - URI Switch
  *  
- *  Fix addChildDevice problem - https://community.smartthings.com/t/use-addchilddevice-with-manual-ip-entry/4594/23
  */
+public static String version() { return "1.0.0" }
+
 definition(
     name: "Raspberry Pi 6160 Creator",
     namespace: "brianegge",
     author: "Brian Egge",
     description: "Creates 6160 Keypad devices",
-    category: "Convenience",
+    category:    "Safety & Security",
     iconUrl: "https://github.com/chancsc/icon/raw/master/standard-tile%401x.png",
     iconX2Url: "https://github.com/chancsc/icon/raw/master/standard-tile@2x.png",
-    iconX3Url: "https://github.com/chancsc/icon/raw/master/standard-tile@3x.png")
+    iconX3Url: "https://github.com/chancsc/icon/raw/master/standard-tile@3x.png"
+    singleInstance: true
+)
 
 
 preferences {
@@ -55,7 +58,7 @@ def initialize() {
     log.debug(deviceId)
     def existing = getChildDevice(deviceId)
     if (!existing) {
-        def childDevice = addChildDevice("sc", "HTTP Switch", deviceId, theHub.id, [label: switchLabel])
+        def childDevice = addChildDevice("brianegge", "6160 Keypad", deviceId, theHub.id, [label: switchLabel])
     }
 }
 
