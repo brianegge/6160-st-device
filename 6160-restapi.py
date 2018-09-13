@@ -43,6 +43,17 @@ def write(msg):
 def status():    
     return 'online', 200
 
+# parse F7 command, form is F7[A] z=FC t=0 c=1 r=0 a=0 s=0 p=1 b=1 1=1234567890123456 2=ABCDEFGHIJKLMNOP
+#   z - zone             (byte arg)
+#   t - tone             (nibble arg)
+#   c - chime            (bool arg)
+#   r - ready            (bool arg)
+#   a - arm-away         (bool arg)
+#   s - arm-stay         (bool arg)
+#   p - power-on         (bool arg)
+#   b - lcd-backlight-on (bool arg)
+#   1 - line1 text       (16-chars)
+#   2 - line2 text       (16-chars)
 @app.route("/message/<line_no>/<text>", methods=['GET', 'POST'])
 def message(line_no, text):    
     return write('F7 {}={:<16}\n'.format(line_no, text))
@@ -53,11 +64,11 @@ def ready(state):
 
 @app.route("/arm-away/<state>", methods=['GET', 'POST'])
 def arm_away(state):    
-    return write('F7 1={:<16} a={}\n'.format('Armed Away' if state == '1' else 'Disarmed', state))
+    return write('F7 b=1 1={:<16} a={}\n'.format('Armed Away' if state == '1' else 'Disarmed', state))
 
 @app.route("/arm-stay/<state>", methods=['GET', 'POST'])
 def arm_stay(state):    
-    return write('F7 1={:<16} s={}\n'.format('Armed Stay' if state == '1' else 'Disarmed', state))
+    return write('F7 b=1 1={:<16} s={}\n'.format('Armed Stay' if state == '1' else 'Disarmed', state))
 
 if __name__ == "__main__":
     # start a thread to read events off the serial port
