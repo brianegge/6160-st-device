@@ -26,11 +26,16 @@ metadata {
     }
 
     preferences {
-        input("DeviceIP", "string", title:"Device IP Address", description: "Please enter your device's IP Address", required: true, displayDuringSetup: true)
-        input("DevicePort", "string", title:"Device Port", description: "Empty assumes port 8282.", required: false, displayDuringSetup: true)
-        input("DevicePathOn", "string", title:"URL Path for ON", description: "Rest of the URL, include forward slash.", displayDuringSetup: true)
-        input("DevicePathOff", "string", title:"URL Path for OFF", description: "Rest of the URL, include forward slash.", displayDuringSetup: true)
-        input(name: "DevicePostGet", type: "enum", title: "POST or GET", options: ["POST","GET"], defaultValue: "POST", required: false, displayDuringSetup: true)
+        section("Setup") {
+            input("DeviceIP", "string", title:"Device IP Address", description: "Please enter your device's IP Address", required: true, displayDuringSetup: true)
+                input("DevicePort", "string", title:"Device Port", description: "Empty assumes port 8282.", required: false, displayDuringSetup: true)
+                input("DevicePathOn", "string", title:"URL Path for ON", description: "Rest of the URL, include forward slash.", displayDuringSetup: true)
+                input("DevicePathOff", "string", title:"URL Path for OFF", description: "Rest of the URL, include forward slash.", displayDuringSetup: true)
+                input(name: "DevicePostGet", type: "enum", title: "POST or GET", options: ["POST","GET"], defaultValue: "POST", required: false, displayDuringSetup: true)
+        }
+        section("Ready when") {
+            input("contact", "capability.contactSensor", title: "Contacts Closed", required: false, multiple: true)
+        }
         section() {
             input("HTTPAuth", "bool", title:"Requires User Auth?", description: "Choose if the HTTP requires basic authentication", defaultValue: false, required: true, displayDuringSetup: true)
             input("HTTPUser", "string", title:"HTTP User", description: "Enter your basic username", required: false, displayDuringSetup: true)
@@ -54,6 +59,28 @@ metadata {
     }
 }
 
+def installed() {
+    log.debug "Installed with settings: ${settings}"
+    subscribeToEvents()
+}
+
+def updated() {
+    log.debug "Updated with settings: ${settings}"
+    unsubscribe()
+    subscribeToEvents()
+}
+
+def subscribeToEvents() {
+  subscribe(contact, "contact.open", eventHandler)
+  subscribe(contact, "contact.closed", eventHandler)
+}
+
+def eventHandler(evt) {
+  log.debug "$evt.name:$evt.value, pushAndPhone:$pushAndPhone, '$msg'"
+  msg = '/message/1/{{ triggerEvent.descriptionText }}'
+  runCmd(msg)
+}
+  
 def parse(String description) {
     log.debug(description)
 }
