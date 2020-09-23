@@ -71,8 +71,8 @@ def setsthm():
     content = request.json
     pprint(content)
     mode = content['@sthm_mode']
-    with open(state_file, 'w') as out_file:
-        out_file.write(sthm_file)
+    with open(sthm_file, 'w') as out_file:
+        out_file.write(mode)
     message(1, mode)
     return 'OK', 200
 
@@ -95,7 +95,7 @@ def message(line_no, text):
     elif text == 'Armed Stay':
         args += 'r=0 a=0 s=1 b=1 c=0 t=2 '
     elif text == 'Disarmed':
-        args += 'r=0 a=0 s=0 b=1 c=0 t=1 '
+        args += 'r=1 a=0 s=0 b=1 c=0 t=1 '
     out, code = write('F7 {}{}={:<16}\n'.format(args, line_no, text)) 
     sleep(1.5)
     out2, code = write('F7 t=0\n'.format(args, line_no, text))
