@@ -8,8 +8,8 @@ import time
 from time import localtime, strftime, sleep
 import sys
 import threading
-#import thread
 import os
+import re
 from pprint import pprint
 
 # Init
@@ -18,8 +18,9 @@ app = Flask(__name__)
 ser = serial.serial_for_url('/dev/ttyACM0', baudrate=115200, timeout=1)
 sio = io.TextIOWrapper(io.BufferedRWPair(ser, ser))
 sio_lock = threading.Lock()
-state_file = '/home/pi/6160/mode.txt'
-sthm_file = '/home/pi/6160/sthm.txt'
+state_dir = '/home/pi/6160/state/'
+state_file = '/home/pi/6160/state/mode.txt'
+sthm_file = '/home/pi/6160/state/sthm.txt'
 
 def reader():
     last_time = ''
@@ -33,11 +34,12 @@ def reader():
         out = strftime("%a %b %e %I:%M", localtime())
         if out != last_time:
             last_time = out
-            message(2, out)
+            message(2, out, quiet=True)
 
-def write(msg):
+def write(msg, quiet):
     with sio_lock:
-        sys.stdout.write('>>' + msg)
+        if not quiet:
+            sys.stdout.write('>>' + msg)
         sio.write(msg)
         sio.flush()
     return msg, 200
@@ -54,11 +56,29 @@ def mode():
 @app.route("/mode", methods=[ 'POST'])
 def setmode():
     content = request.json
-    pprint(content)
     mode = content['$locationMode'] 
     with open(state_file, 'w') as out_file:
         out_file.write(mode)
     message(1, mode)
+    return 'OK', 200
+
+@app.route("/device/<name>", methods=['GET'])
+def device(name):
+    f = os.path.join(state_dir, name)
+    try:
+        with open(f, 'r') as in_file:
+            return in_file.read()
+    except FileNotFoundError:
+        return 'Unknown device', 404
+
+@app.route("/device/<name>", methods=[ 'POST'])
+def setdevice(name):
+    content = request.json
+    pprint(content)
+    attribute = content['$currentEventValue']
+    f = os.path.join(state_dir, name)
+    with open(f, 'w') as out_file:
+        out_file.write(attribute)
     return 'OK', 200
 
 @app.route("/sthm", methods=['GET'])
@@ -88,7 +108,7 @@ def setsthm():
 #   1 - line1 text       (16-chars)
 #   2 - line2 text       (16-chars)
 @app.route("/message/<line_no>/<text>", methods=['GET', 'POST'])
-def message(line_no, text):    
+def message(line_no, text, quiet=False):
     args=''
     if text == 'Armed Away':
         args += 'r=0 a=1 s=0 b=0 c=0 t=2 '
@@ -96,10 +116,13 @@ def message(line_no, text):
         args += 'r=0 a=0 s=1 b=1 c=0 t=2 '
     elif text == 'Disarmed':
         args += 'r=1 a=0 s=0 b=1 c=0 t=1 '
-    out, code = write('F7 {}{}={:<16}\n'.format(args, line_no, text)) 
-    sleep(1.5)
-    out2, code = write('F7 t=0\n'.format(args, line_no, text))
-    return out + out2, code
+    out, code = write('F7 {}{}={:<16}\n'.format(args, line_no, text), quiet)
+    if re.match(".*t=[0-9].*", args):
+        sleep(1.5)
+        out2, code = write('F7 t=0\n'.format(args, line_no, text), quiet)
+        return out + out2, code
+    else:
+        return out, code
 
 @app.route("/message", methods=['POST'])
 def show_message():
