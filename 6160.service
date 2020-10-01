@@ -1,0 +1,15 @@
+[Unit]
+Description=Interface SmartThings to 6160 Display
+After=multi-user.target
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+Restart=always
+RestartSec=60
+User=pi
+WorkingDirectory=/home/pi/6160-st-device
+ExecStart=/home/pi/6160-st-device/6160-restapi.py
+
+[Install]
+WantedBy=default.target
+

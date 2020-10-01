@@ -7,4 +7,12 @@ Without Tom Vickers Arduino2keypad project, this project would not be possible. 
 
 Install
 
-sudo apt-get install python-pip
+# pi setup
+sudo apt-get install vim git python3-pip
+sudo update-alternatives --config editor
+
+# project
+git clone git@github.com:brianegge/6160-st-device.git
+sudo pip3 install -r requirements.txt
+sudo ln -s /home/pi/6160-st-device/6160.service /etc/systemd/system/6160.service
+sudo systemctl enable 6160

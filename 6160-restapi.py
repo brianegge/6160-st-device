@@ -18,9 +18,9 @@ app = Flask(__name__)
 ser = serial.serial_for_url('/dev/ttyACM0', baudrate=115200, timeout=1)
 sio = io.TextIOWrapper(io.BufferedRWPair(ser, ser))
 sio_lock = threading.Lock()
-state_dir = '/home/pi/6160/state/'
-state_file = '/home/pi/6160/state/mode.txt'
-sthm_file = '/home/pi/6160/state/sthm.txt'
+state_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),'state')
+state_file = os.path.join(state_dir, 'mode.txt')
+sthm_file = os.path.join(state_dir, 'sthm.txt')
 
 def reader():
     last_time = ''
@@ -50,8 +50,11 @@ def status():
 
 @app.route("/mode")
 def mode():    
-    with open(state_file, 'r') as in_file:
-        return in_file.read()
+    try:
+        with open(state_file, 'r') as in_file:
+            return in_file.read()
+    except FileNotFoundError:
+        return 'Unknown mode', 404
 
 @app.route("/mode", methods=[ 'POST'])
 def setmode():
@@ -83,8 +86,11 @@ def setdevice(name):
 
 @app.route("/sthm", methods=['GET'])
 def sthm():
-    with open(sthm_file, 'r') as in_file:
-        return in_file.read()
+    try:
+        with open(sthm_file, 'r') as in_file:
+            return in_file.read()
+    except FileNotFoundError:
+        return 'Unknown state', 404
 
 @app.route("/sthm", methods=[ 'POST'])
 def setsthm():
@@ -134,23 +140,7 @@ def show_message():
     text = content.get('text')
     text = shorten(text)
     args = 'b={} '.format(backlight)
-    return write('F7 {}{}={:16.16}\n'.format(args, line_no, text))
-
-@app.route("/ready/<state>", methods=['GET', 'POST'])
-def ready(state):    
-    return write('F7 r={}\n'.format(state))
-
-@app.route("/tone/<tone>", methods=['GET', 'POST'])
-def tone(tone):    
-    return write('F7 t={}\n'.format(tone))
-
-@app.route("/arm-away/<state>", methods=['GET', 'POST'])
-def arm_away(state):    
-    return write('F7 b=1 1={:<16} a={}\n'.format('Armed Away' if state == '1' else 'Disarmed', state))
-
-@app.route("/arm-stay/<state>", methods=['GET', 'POST'])
-def arm_stay(state):    
-    return write('F7 b=1 1={:<16} s={}\n'.format('Armed Stay' if state == '1' else 'Disarmed', state))
+    return write('F7 {}{}={:16.16}\n'.format(args, line_no, text), False)
 
 def shorten(msg):
     if len(msg) > 16:
@@ -169,6 +159,7 @@ def shorten(msg):
 
 if __name__ == "__main__":
     # start a thread to read events off the serial port
+    os.makedirs(state_dir, exist_ok = True)
     d = threading.Thread(name='reader', target=reader)
     d.setDaemon(True)
     d.start()
