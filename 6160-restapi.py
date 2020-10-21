@@ -15,7 +15,13 @@ from pprint import pprint
 # Init
 app = Flask(__name__)
 
-ser = serial.serial_for_url('/dev/ttyACM0', baudrate=115200, timeout=1)
+if os.path.exists('/dev/ttyACM0'):
+    ser = serial.serial_for_url('/dev/ttyACM0', baudrate=115200, timeout=1)
+elif os.path.exists('/dev/ttyACM1'):
+    ser = serial.serial_for_url('/dev/ttyACM1', baudrate=115200, timeout=1)
+else:
+    raise Exception("No serial device found")
+
 sio = io.TextIOWrapper(io.BufferedRWPair(ser, ser))
 sio_lock = threading.Lock()
 state_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),'state')
@@ -122,8 +128,12 @@ def message(line_no, text, quiet=False):
         args += 'r=0 a=0 s=1 b=1 c=0 t=2 '
     elif text == 'Disarmed':
         args += 'r=1 a=0 s=0 b=1 c=0 t=1 '
+    elif text == 'Raspberry Pi OK':
+        args += 'r=1 a=0 s=0 b=1 c=1 t=0 '
+    else:
+        args += 'c=1 '
     out, code = write('F7 {}{}={:<16}\n'.format(args, line_no, text), quiet)
-    if re.match(".*t=[0-9].*", args):
+    if re.match(".*t=[1-9].*", args):
         sleep(1.5)
         out2, code = write('F7 t=0\n'.format(args, line_no, text), quiet)
         return out + out2, code
