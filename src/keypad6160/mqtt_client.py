@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 
-from keypad6160.f7_protocol import build_message, build_raw_message
+from keypad6160.f7_protocol import build_backlight_command, build_message, build_raw_message
 
 if TYPE_CHECKING:
     from keypad6160.config import Config
@@ -75,9 +75,9 @@ class KeypadMqttClient:
     ) -> None:
         if rc.is_failure:
             log.error("MQTT connect failed: %s", rc)
-        else:
-            log.info("Connected to MQTT broker")
             return
+
+        log.info("Connected to MQTT broker")
 
         # Publish online status
         self._publish(f"{self._prefix}/status", "online", retain=True)
@@ -89,6 +89,7 @@ class KeypadMqttClient:
             (f"{self._prefix}/message/set", 1),
             (f"{self._prefix}/message/1/set", 1),
             (f"{self._prefix}/message/2/set", 1),
+            (f"{self._prefix}/backlight/set", 1),
         ]
         client.subscribe(topics)
         log.info("Subscribed to %d topics", len(topics))
@@ -114,6 +115,8 @@ class KeypadMqttClient:
                 self._handle_line_message(1, payload)
             elif topic == f"{self._prefix}/message/2/set":
                 self._handle_line_message(2, payload)
+            elif topic == f"{self._prefix}/backlight/set":
+                self._handle_backlight(payload)
             else:
                 log.warning("Unhandled topic: %s", topic)
         except Exception:
@@ -142,6 +145,16 @@ class KeypadMqttClient:
     def _handle_line_message(self, line_no: int, text: str) -> None:
         cmd = build_message(line_no, text)
         self._writer.enqueue(cmd)
+
+    def _handle_backlight(self, payload: str) -> None:
+        on = payload.upper() in ("ON", "1", "TRUE")
+        cmd = build_backlight_command(on)
+        self._writer.enqueue(cmd)
+        self._publish(
+            f"{self._prefix}/backlight/state",
+            "ON" if on else "OFF",
+            retain=True,
+        )
 
     # -- Helpers -----------------------------------------------------------
 

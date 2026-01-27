@@ -86,6 +86,27 @@ class TestMqttCallbacks:
         mqtt_client._on_message(mqtt_client._client, None, msg)
         writer.enqueue.assert_called_once()
 
+    def test_on_message_dispatches_backlight(self, mqtt_client, writer):
+        msg = MagicMock()
+        msg.topic = "test/6160/backlight/set"
+        msg.payload = b"ON"
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        writer.enqueue.assert_called_once()
+        cmd = writer.enqueue.call_args[0][0]
+        assert "b=1" in cmd.payloads[0]
+
+    def test_handle_backlight_off(self, mqtt_client, writer):
+        mqtt_client._handle_backlight("OFF")
+        writer.enqueue.assert_called_once()
+        cmd = writer.enqueue.call_args[0][0]
+        assert "b=0" in cmd.payloads[0]
+
+    def test_handle_backlight_publishes_state(self, mqtt_client):
+        mqtt_client._handle_backlight("ON")
+        calls = mqtt_client._client.publish.call_args_list
+        state_call = [c for c in calls if "backlight/state" in str(c)]
+        assert len(state_call) == 1
+
     def test_on_message_handles_error(self, mqtt_client, writer):
         msg = MagicMock()
         msg.topic = "test/6160/message/set"
@@ -101,10 +122,11 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 3
+        assert len(messages) == 4
         topics = [t for t, _ in messages]
         assert "homeassistant/select/keypad_6160_mode/config" in topics
         assert "homeassistant/select/keypad_6160_sthm/config" in topics
+        assert "homeassistant/light/keypad_6160_backlight/config" in topics
         assert "homeassistant/text/keypad_6160_message/config" in topics
 
         # Verify JSON payloads are valid

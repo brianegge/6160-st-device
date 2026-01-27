@@ -48,6 +48,21 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
         }),
     ))
 
+    # Backlight
+    messages.append((
+        "homeassistant/light/keypad_6160_backlight/config",
+        json.dumps({
+            "name": "Keypad Backlight",
+            "unique_id": "keypad_6160_backlight",
+            "command_topic": f"{prefix}/backlight/set",
+            "state_topic": f"{prefix}/backlight/state",
+            "availability_topic": f"{prefix}/status",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+    ))
+
     # Text message input
     messages.append((
         "homeassistant/text/keypad_6160_message/config",

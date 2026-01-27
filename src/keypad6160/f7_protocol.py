@@ -94,3 +94,9 @@ def build_raw_message(
     args = f"b={backlight} "
     payload = f"F7 {args}{line_no}={text:16.16}\n"
     return SerialCommand(payloads=[payload])
+
+
+def build_backlight_command(on: bool) -> SerialCommand:
+    """Build an F7 command that only toggles the LCD backlight."""
+    payload = f"F7 b={1 if on else 0}\n"
+    return SerialCommand(payloads=[payload])

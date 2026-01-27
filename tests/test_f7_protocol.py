@@ -2,6 +2,7 @@
 
 from keypad6160.f7_protocol import (
     SerialCommand,
+    build_backlight_command,
     build_message,
     build_raw_message,
     shorten,
@@ -96,3 +97,13 @@ class TestBuildRawMessage:
         idx = payload.index("1=") + 2
         text_part = payload[idx:].rstrip("\n")
         assert len(text_part) == 16
+
+
+class TestBuildBacklightCommand:
+    def test_on(self):
+        cmd = build_backlight_command(True)
+        assert cmd.payloads == ["F7 b=1\n"]
+
+    def test_off(self):
+        cmd = build_backlight_command(False)
+        assert cmd.payloads == ["F7 b=0\n"]
