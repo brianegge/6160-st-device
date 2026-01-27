@@ -1,0 +1,15 @@
+[Unit]
+Description=6160 Keypad MQTT Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+EnvironmentFile=/home/pi/6160-st-device/quadlet/keypad6160.env
+ExecStart=/home/pi/.local/bin/keypad6160
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
