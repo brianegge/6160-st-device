@@ -1,0 +1,18 @@
+[Unit]
+Description=6160 Keypad MQTT Service
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/keypad6160:latest
+EnvironmentFile=%h/.config/containers/systemd/keypad6160.env
+AddDevice=/dev/ttyACM0
+# Run as non-root; the keypad user in the container is in the dialout group
+SecurityLabelDisable=true
+
+[Service]
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

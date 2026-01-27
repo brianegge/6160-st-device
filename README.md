@@ -1,18 +1,59 @@
-# 6160 SmartThings Device Handler
-This repository requires an Arduino running https://github.com/TomVickers/Arduino2keypad
+# 6160 Keypad MQTT Service
 
-This repository contains code to interface a 6160 alarm keypad with an SmartThings Smart Home Monitor.  If you are interested in using a 6160 alarm keypad (commonly found connected to a variety of Honeywell alarm systems like the Vista-20p), this code may be useful to you.
+MQTT service for interfacing a Honeywell 6160 alarm keypad with HomeAssistant.
 
-Without Tom Vickers Arduino2keypad project, this project would not be possible. His project does the work of interfacing with the non-standard 4800 baud keypad. Tom chose to write an entire security panel on his Raspberry Pi while this project simply aims to make the keypad accessabe from the SmartThings ecosystem.
+Requires an Arduino running [Arduino2keypad](https://github.com/TomVickers/Arduino2keypad) connected via USB serial.
 
-Install
+## Architecture
 
-# pi setup
-sudo apt-get install vim git python3-pip
-sudo update-alternatives --config editor
+```
+HomeAssistant --> MQTT Broker --> keypad6160 --> serial --> Arduino --> 6160 keypad
+                                  (Podman)
+```
 
-# project
-git clone git@github.com:brianegge/6160-st-device.git
-sudo pip3 install -r requirements.txt
-sudo ln -s /home/pi/6160-st-device/6160.service /etc/systemd/system/6160.service
-sudo systemctl enable 6160
+## Configuration
+
+All settings are controlled via `KEYPAD_*` environment variables. See `quadlet/keypad6160.env` for the full list.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## Container Build
+
+```bash
+podman build -t keypad6160:latest .
+```
+
+## Deploy (Podman Quadlet)
+
+Copy the quadlet files and environment template:
+
+```bash
+mkdir -p ~/.config/containers/systemd
+cp quadlet/keypad6160.container ~/.config/containers/systemd/
+cp quadlet/keypad6160.env ~/.config/containers/systemd/
+# Edit ~/.config/containers/systemd/keypad6160.env with your MQTT credentials
+systemctl --user daemon-reload
+systemctl --user start keypad6160
+```
+
+## MQTT Topics
+
+All topics are under the configurable prefix (default `homeassistant/6160`):
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `status` | publish | LWT: `online`/`offline` (retained) |
+| `mode/set` | subscribe | Set alarm mode (e.g. `Armed Away`) |
+| `mode/state` | publish | Current mode (retained) |
+| `sthm/set` | subscribe | Set STHM mode |
+| `sthm/state` | publish | Current STHM mode (retained) |
+| `message/set` | subscribe | JSON: `{"text", "line_no", "backlight"}` |
+| `message/1/set` | subscribe | Plain text for LCD line 1 |
+| `message/2/set` | subscribe | Plain text for LCD line 2 |
+
+HomeAssistant auto-discovery entities are published on connect.

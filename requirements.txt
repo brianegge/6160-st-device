@@ -1,4 +1,0 @@
-pyserial
-flask
-jsonify
-requests

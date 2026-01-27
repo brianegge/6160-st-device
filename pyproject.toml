@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "keypad6160"
+version = "1.0.0"
+description = "MQTT service for Honeywell 6160 alarm keypad via Arduino2keypad"
+requires-python = ">=3.11"
+dependencies = [
+    "pyserial>=3.5",
+    "paho-mqtt>=2.0",
+]
+
+[project.scripts]
+keypad6160 = "keypad6160.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/keypad6160"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
