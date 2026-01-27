@@ -27,8 +27,12 @@ A Raspberry Pi Zero W connects over USB serial to an Arduino Mega running [Ardui
 
 ## Architecture
 
-```
-HomeAssistant --> MQTT Broker --> keypad6160 --> serial --> Arduino --> 6160 keypad
+```mermaid
+graph LR
+    HA[HomeAssistant] -->|MQTT| Broker[MQTT Broker]
+    Broker -->|MQTT| K[keypad6160]
+    K -->|serial| Arduino
+    Arduino -->|keypad bus| Keypad[6160 Keypad]
 ```
 
 ## Configuration
