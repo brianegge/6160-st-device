@@ -39,6 +39,7 @@ All settings are controlled via `KEYPAD_*` environment variables. See `quadlet/k
 
 ```bash
 pip install -e ".[dev]"
+git config core.hooksPath .githooks
 pytest
 ```
 
