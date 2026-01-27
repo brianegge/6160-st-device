@@ -73,10 +73,10 @@ class KeypadMqttClient:
         rc: mqtt.ReasonCode,
         properties: mqtt.Properties | None = None,
     ) -> None:
-        if rc == mqtt.ReasonCode(mqtt.ReasonCodes.SUCCESS):
-            log.info("Connected to MQTT broker")
-        else:
+        if rc.is_failure:
             log.error("MQTT connect failed: %s", rc)
+        else:
+            log.info("Connected to MQTT broker")
             return
 
         # Publish online status
