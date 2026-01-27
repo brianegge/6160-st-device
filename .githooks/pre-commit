@@ -1,0 +1,8 @@
+#!/bin/sh
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+
+if [ "$branch" = "master" ]; then
+    echo "Direct commits to master are not allowed. Create a feature branch and open a PR."
+    exit 1
+fi
