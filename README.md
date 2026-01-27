@@ -50,8 +50,8 @@ All topics are under the configurable prefix (default `homeassistant/6160`):
 | `status` | publish | LWT: `online`/`offline` (retained) |
 | `mode/set` | subscribe | Set alarm mode (e.g. `Armed Away`) |
 | `mode/state` | publish | Current mode (retained) |
-| `sthm/set` | subscribe | Set STHM mode |
-| `sthm/state` | publish | Current STHM mode (retained) |
+| `backlight/set` | subscribe | `ON` or `OFF` to toggle LCD backlight |
+| `backlight/state` | publish | Current backlight state (retained) |
 | `message/set` | subscribe | JSON: `{"text", "line_no", "backlight"}` |
 | `message/1/set` | subscribe | Plain text for LCD line 1 |
 | `message/2/set` | subscribe | Plain text for LCD line 2 |

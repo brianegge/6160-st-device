@@ -85,7 +85,6 @@ class KeypadMqttClient:
         # Subscribe to command topics
         topics = [
             (f"{self._prefix}/mode/set", 1),
-            (f"{self._prefix}/sthm/set", 1),
             (f"{self._prefix}/message/set", 1),
             (f"{self._prefix}/message/1/set", 1),
             (f"{self._prefix}/message/2/set", 1),
@@ -107,8 +106,6 @@ class KeypadMqttClient:
         try:
             if topic == f"{self._prefix}/mode/set":
                 self._handle_mode(payload)
-            elif topic == f"{self._prefix}/sthm/set":
-                self._handle_sthm(payload)
             elif topic == f"{self._prefix}/message/set":
                 self._handle_json_message(payload)
             elif topic == f"{self._prefix}/message/1/set":
@@ -128,11 +125,6 @@ class KeypadMqttClient:
         cmd = build_message(1, mode)
         self._writer.enqueue(cmd)
         self._publish(f"{self._prefix}/mode/state", mode, retain=True)
-
-    def _handle_sthm(self, mode: str) -> None:
-        cmd = build_message(1, mode)
-        self._writer.enqueue(cmd)
-        self._publish(f"{self._prefix}/sthm/state", mode, retain=True)
 
     def _handle_json_message(self, raw: str) -> None:
         data = json.loads(raw)

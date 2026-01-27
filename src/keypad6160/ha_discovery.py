@@ -34,20 +34,6 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
         }),
     ))
 
-    # STHM selector
-    messages.append((
-        "homeassistant/select/keypad_6160_sthm/config",
-        json.dumps({
-            "name": "Keypad STHM",
-            "unique_id": "keypad_6160_sthm",
-            "command_topic": f"{prefix}/sthm/set",
-            "state_topic": f"{prefix}/sthm/state",
-            "options": ["Armed Away", "Armed Stay", "Disarmed"],
-            "availability_topic": f"{prefix}/status",
-            "device": device_info,
-        }),
-    ))
-
     # Backlight
     messages.append((
         "homeassistant/light/keypad_6160_backlight/config",

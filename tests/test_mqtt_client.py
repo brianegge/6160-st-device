@@ -45,12 +45,6 @@ class TestMqttCallbacks:
         state_call = [c for c in calls if "mode/state" in str(c)]
         assert len(state_call) == 1
 
-    def test_handle_sthm(self, mqtt_client, writer):
-        mqtt_client._handle_sthm("Armed Stay")
-        writer.enqueue.assert_called_once()
-        cmd = writer.enqueue.call_args[0][0]
-        assert "Armed Stay" in cmd.payloads[0]
-
     def test_handle_json_message(self, mqtt_client, writer):
         payload = json.dumps({"text": "Hello", "line_no": "1", "backlight": "1"})
         mqtt_client._handle_json_message(payload)
@@ -122,10 +116,9 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 4
+        assert len(messages) == 3
         topics = [t for t, _ in messages]
         assert "homeassistant/select/keypad_6160_mode/config" in topics
-        assert "homeassistant/select/keypad_6160_sthm/config" in topics
         assert "homeassistant/light/keypad_6160_backlight/config" in topics
         assert "homeassistant/text/keypad_6160_message/config" in topics
 
