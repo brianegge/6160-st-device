@@ -56,6 +56,18 @@ class TestSerialWriter:
         writer.join(timeout=2)
         port.write.assert_called_once()
 
+    def test_reset_toggles_dtr(self):
+        port = MagicMock()
+        writer = SerialWriter(port, min_delay=0.0)
+        writer.start()
+        cmd = SerialCommand(reset=True)
+        writer.enqueue(cmd)
+        writer.shutdown()
+        writer.join(timeout=2)
+        # DTR should have been toggled: False then True
+        assert port.dtr is True
+        port.write.assert_not_called()
+
     def test_write_error_does_not_stop_loop(self):
         port = MagicMock()
         port.write.side_effect = [OSError("write failed"), None]

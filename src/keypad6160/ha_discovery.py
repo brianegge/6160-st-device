@@ -62,4 +62,17 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
         }),
     ))
 
+    # Reset button
+    messages.append((
+        "homeassistant/button/keypad_6160_reset/config",
+        json.dumps({
+            "name": "Keypad Reset",
+            "unique_id": "keypad_6160_reset",
+            "command_topic": f"{prefix}/reset/set",
+            "availability_topic": f"{prefix}/status",
+            "device_class": "restart",
+            "device": device_info,
+        }),
+    ))
+
     return messages

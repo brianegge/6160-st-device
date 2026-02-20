@@ -52,6 +52,9 @@ class SerialWriter(threading.Thread):
                 log.exception("Error writing serial command")
 
     def _execute(self, cmd: SerialCommand) -> None:
+        if cmd.reset:
+            self._reset_device()
+            return
         for i, payload in enumerate(cmd.payloads):
             if not cmd.quiet:
                 log.info(">> %s", payload.strip())
@@ -63,6 +66,13 @@ class SerialWriter(threading.Thread):
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
             sleep(self._min_delay)
+
+    def _reset_device(self) -> None:
+        """Reset the Arduino by toggling the DTR line."""
+        log.info("Resetting Arduino via DTR toggle")
+        self._port.dtr = False
+        sleep(0.1)
+        self._port.dtr = True
 
 
 class SerialReader(threading.Thread):

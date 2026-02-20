@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 
-from keypad6160.f7_protocol import build_backlight_command, build_message, build_raw_message
+from keypad6160.f7_protocol import (
+    build_backlight_command,
+    build_message,
+    build_raw_message,
+    build_reset_command,
+)
 
 if TYPE_CHECKING:
     from keypad6160.config import Config
@@ -89,6 +94,7 @@ class KeypadMqttClient:
             (f"{self._prefix}/message/1/set", 1),
             (f"{self._prefix}/message/2/set", 1),
             (f"{self._prefix}/backlight/set", 1),
+            (f"{self._prefix}/reset/set", 1),
         ]
         client.subscribe(topics)
         log.info("Subscribed to %d topics", len(topics))
@@ -114,6 +120,8 @@ class KeypadMqttClient:
                 self._handle_line_message(2, payload)
             elif topic == f"{self._prefix}/backlight/set":
                 self._handle_backlight(payload)
+            elif topic == f"{self._prefix}/reset/set":
+                self._handle_reset()
             else:
                 log.warning("Unhandled topic: %s", topic)
         except Exception:
@@ -136,6 +144,10 @@ class KeypadMqttClient:
 
     def _handle_line_message(self, line_no: int, text: str) -> None:
         cmd = build_message(line_no, text)
+        self._writer.enqueue(cmd)
+
+    def _handle_reset(self) -> None:
+        cmd = build_reset_command()
         self._writer.enqueue(cmd)
 
     def _handle_backlight(self, payload: str) -> None:

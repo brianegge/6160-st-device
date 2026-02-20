@@ -29,6 +29,7 @@ class SerialCommand:
     payloads: list[str] = field(default_factory=list)
     delays: list[float] = field(default_factory=list)
     quiet: bool = False
+    reset: bool = False
 
 
 # Maps well-known alarm text to F7 flag strings.
@@ -100,3 +101,8 @@ def build_backlight_command(on: bool) -> SerialCommand:
     """Build an F7 command that only toggles the LCD backlight."""
     payload = f"F7 b={1 if on else 0}\n"
     return SerialCommand(payloads=[payload])
+
+
+def build_reset_command() -> SerialCommand:
+    """Build a command that resets the Arduino by toggling DTR."""
+    return SerialCommand(reset=True)

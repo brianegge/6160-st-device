@@ -5,6 +5,7 @@ from keypad6160.f7_protocol import (
     build_backlight_command,
     build_message,
     build_raw_message,
+    build_reset_command,
     shorten,
 )
 
@@ -107,3 +108,10 @@ class TestBuildBacklightCommand:
     def test_off(self):
         cmd = build_backlight_command(False)
         assert cmd.payloads == ["F7 b=0\n"]
+
+
+class TestBuildResetCommand:
+    def test_reset_flag(self):
+        cmd = build_reset_command()
+        assert cmd.reset is True
+        assert cmd.payloads == []
