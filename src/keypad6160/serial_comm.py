@@ -92,13 +92,14 @@ class SerialIO(threading.Thread):
     # -- Reading -----------------------------------------------------------
 
     def _read_response(self, source: str) -> None:
-        """Block for the Arduino's response, then drain any extra lines."""
-        raw = self._port.readline()  # blocks up to port.timeout
-        if raw:
-            line = raw.decode("ascii", errors="replace").strip()
-            if line:
-                log.info("<< [%s] %s", source, line)
-                self._handle_line(line)
+        """Wait briefly for data, then drain all available lines.
+
+        The Arduino does not respond to valid F7 commands, so we use a
+        short fixed delay instead of a full blocking readline.  This is
+        long enough for the Arduino to finish processing the previous
+        command before we send the next one.
+        """
+        sleep(0.05)
         while self._port.in_waiting:
             raw = self._port.readline()
             if raw:
