@@ -21,6 +21,9 @@ class Config:
     mqtt_client_id: str = "keypad6160"
     mqtt_topic_prefix: str = "homeassistant/6160"
 
+    # Health check
+    health_port: int = 8080
+
     # Logging
     log_level: str = "INFO"
 
@@ -37,5 +40,6 @@ class Config:
             mqtt_password=os.environ.get("KEYPAD_MQTT_PASSWORD", cls.mqtt_password),
             mqtt_client_id=os.environ.get("KEYPAD_MQTT_CLIENT_ID", cls.mqtt_client_id),
             mqtt_topic_prefix=os.environ.get("KEYPAD_MQTT_TOPIC_PREFIX", cls.mqtt_topic_prefix),
+            health_port=int(os.environ.get("KEYPAD_HEALTH_PORT", cls.health_port)),
             log_level=os.environ.get("KEYPAD_LOG_LEVEL", cls.log_level),
         )

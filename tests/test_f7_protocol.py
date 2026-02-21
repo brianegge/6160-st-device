@@ -6,6 +6,7 @@ from keypad6160.f7_protocol import (
     build_message,
     build_raw_message,
     build_reset_command,
+    build_tone_command,
     shorten,
 )
 
@@ -108,6 +109,28 @@ class TestBuildBacklightCommand:
     def test_off(self):
         cmd = build_backlight_command(False)
         assert cmd.payloads == ["F7 b=0\n"]
+
+
+class TestBuildToneCommand:
+    def test_tone_with_reset(self):
+        cmd = build_tone_command(1)
+        assert len(cmd.payloads) == 2
+        assert cmd.payloads[0] == "F7 t=1\n"
+        assert cmd.payloads[1] == "F7 t=0\n"
+        assert cmd.delays == [1.5]
+
+    def test_tone_zero_no_reset(self):
+        cmd = build_tone_command(0)
+        assert len(cmd.payloads) == 1
+        assert cmd.payloads[0] == "F7 t=0\n"
+
+    def test_tone_clamped_high(self):
+        cmd = build_tone_command(10)
+        assert "t=7" in cmd.payloads[0]
+
+    def test_tone_clamped_low(self):
+        cmd = build_tone_command(-1)
+        assert "t=0" in cmd.payloads[0]
 
 
 class TestBuildResetCommand:

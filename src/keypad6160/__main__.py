@@ -8,6 +8,7 @@ import sys
 
 from keypad6160.config import Config
 from keypad6160.ha_discovery import build_discovery_messages
+from keypad6160.health import start_health_server
 from keypad6160.mqtt_client import KeypadMqttClient
 from keypad6160.serial_comm import SerialIO, open_serial
 
@@ -26,7 +27,7 @@ def main() -> None:
     log.info("Opening serial port %s", config.serial_device)
     port = open_serial(config)
 
-    serial_io = SerialIO(port)
+    serial_io = SerialIO(port, config=config)
     mqtt_client = KeypadMqttClient(config, serial_io)
     serial_io.on_keypress = mqtt_client.publish_key_event
     serial_io.start()
@@ -41,6 +42,9 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
+
+    # -- Health check ------------------------------------------------------
+    start_health_server(config.health_port)
 
     # -- Connect and publish discovery -------------------------------------
     mqtt_client.connect()
