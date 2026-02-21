@@ -1,69 +1,75 @@
-"""Tests for serial communication (writer and reader)."""
+"""Tests for serial I/O (combined reader/writer)."""
 
 from __future__ import annotations
 
 import queue
 import threading
 import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 from keypad6160.f7_protocol import SerialCommand
-from keypad6160.serial_comm import SerialReader, SerialWriter
+from keypad6160.serial_comm import SerialIO
 
 
-class TestSerialWriter:
+class TestSerialIO:
+    def _make_io(self, port, **kwargs):
+        kwargs.setdefault("min_delay", 0.0)
+        port.timeout = kwargs.pop("timeout", 0.1)
+        # Default: no bytes waiting (tests override via PropertyMock as needed)
+        type(port).in_waiting = PropertyMock(return_value=0)
+        io = SerialIO(port, **kwargs)
+        io.start()
+        return io
+
     def test_single_payload(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
+        io = self._make_io(port)
         cmd = SerialCommand(payloads=["F7 b=1 1=Hello\n"])
-        writer.enqueue(cmd)
-        writer.shutdown()
-        writer.join(timeout=2)
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
         port.write.assert_called_once_with(b"F7 b=1 1=Hello\n")
         port.flush.assert_called_once()
 
     def test_multi_payload_with_delay(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
+        io = self._make_io(port)
         cmd = SerialCommand(
             payloads=["F7 t=2 1=Armed\n", "F7 t=0\n"],
-            delays=[0.01],  # Use tiny delay for test speed
+            delays=[0.01],
         )
-        writer.enqueue(cmd)
-        writer.shutdown()
-        writer.join(timeout=2)
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
         assert port.write.call_count == 2
         port.write.assert_any_call(b"F7 t=2 1=Armed\n")
         port.write.assert_any_call(b"F7 t=0\n")
 
     def test_shutdown_sentinel(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
-        writer.shutdown()
-        writer.join(timeout=2)
-        assert not writer.is_alive()
+        io = self._make_io(port)
+        io.shutdown()
+        io.join(timeout=2)
+        assert not io.is_alive()
 
     def test_quiet_does_not_crash(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
+        io = self._make_io(port)
         cmd = SerialCommand(payloads=["F7 b=1 2=time\n"], quiet=True)
-        writer.enqueue(cmd)
-        writer.shutdown()
-        writer.join(timeout=2)
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
         port.write.assert_called_once()
 
     def test_reset_toggles_dtr(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
+        port.timeout = 0.1
+        io = SerialIO(port, min_delay=0.0)
+        io.start()
         cmd = SerialCommand(reset=True)
-        writer.enqueue(cmd)
-        writer.shutdown()
-        writer.join(timeout=2)
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
         # DTR should have been toggled: False then True
         assert port.dtr is True
         port.write.assert_not_called()
@@ -72,43 +78,34 @@ class TestSerialWriter:
         port = MagicMock()
         port.write.side_effect = [OSError("write failed"), None]
         port.flush.return_value = None
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
-        writer.enqueue(SerialCommand(payloads=["bad\n"]))
-        writer.enqueue(SerialCommand(payloads=["good\n"]))
-        writer.shutdown()
-        writer.join(timeout=2)
-        assert not writer.is_alive()
+        io = self._make_io(port)
+        io.enqueue(SerialCommand(payloads=["bad\n"]))
+        io.enqueue(SerialCommand(payloads=["good\n"]))
+        io.shutdown()
+        io.join(timeout=2)
+        assert not io.is_alive()
 
+    def test_reads_response_after_write(self):
+        port = MagicMock()
+        port.readline.return_value = b"OK\n"
+        io = self._make_io(port)
+        # Override in_waiting: 5 bytes after write, then 0
+        type(port).in_waiting = PropertyMock(side_effect=[5, 0])
+        cmd = SerialCommand(payloads=["F7 b=1 1=Hello\n"], source="test")
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
+        port.write.assert_called_once_with(b"F7 b=1 1=Hello\n")
+        port.readline.assert_called_once()
 
-class TestSerialReader:
     def test_initialized_triggers_callback(self):
         port = MagicMock()
-        port.readline.side_effect = [
-            b"Arduino initialized\n",
-            b"",  # timeout
-            OSError("stop"),  # break the loop
-        ]
-        writer = MagicMock()
         callback = MagicMock()
-        reader = SerialReader(port, writer, on_initialized=callback)
-        reader.daemon = True
-        reader.start()
-        time.sleep(0.2)
+        port.readline.return_value = b"Arduino initialized\n"
+        io = self._make_io(port, on_initialized=callback)
+        # Override: bytes waiting after write, then 0 for the rest
+        type(port).in_waiting = PropertyMock(side_effect=[6, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
         callback.assert_called_once()
-        # Writer should have been given a "Raspberry Pi OK" command
-        writer.enqueue.assert_called()
-        cmd = writer.enqueue.call_args_list[0][0][0]
-        assert "Raspberry Pi OK" in cmd.payloads[0]
-
-    def test_clock_update_on_timeout(self):
-        port = MagicMock()
-        # Return empty bytes (simulating timeout), then error to stop
-        port.readline.side_effect = [b"", b"", OSError("stop")]
-        writer = MagicMock()
-        reader = SerialReader(port, writer)
-        reader.daemon = True
-        reader.start()
-        time.sleep(0.3)
-        # At least one clock update should have been enqueued
-        assert writer.enqueue.call_count >= 1

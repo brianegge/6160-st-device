@@ -9,7 +9,7 @@ import sys
 from keypad6160.config import Config
 from keypad6160.ha_discovery import build_discovery_messages
 from keypad6160.mqtt_client import KeypadMqttClient
-from keypad6160.serial_comm import SerialReader, SerialWriter, open_serial
+from keypad6160.serial_comm import SerialIO, open_serial
 
 log = logging.getLogger(__name__)
 
@@ -25,19 +25,16 @@ def main() -> None:
     log.info("Opening serial port %s", config.serial_device)
     port = open_serial(config)
 
-    writer = SerialWriter(port, min_delay=config.serial_min_delay)
-    writer.start()
+    serial_io = SerialIO(port, min_delay=config.serial_min_delay)
+    serial_io.start()
 
-    mqtt_client = KeypadMqttClient(config, writer)
-
-    reader = SerialReader(port, writer)
-    reader.start()
+    mqtt_client = KeypadMqttClient(config, serial_io)
 
     # -- Signal handling ---------------------------------------------------
     def _shutdown(signum: int, frame: object) -> None:
         log.info("Received signal %s, shutting down", signum)
         mqtt_client.disconnect()
-        writer.shutdown()
+        serial_io.shutdown()
         port.close()
         sys.exit(0)
 
