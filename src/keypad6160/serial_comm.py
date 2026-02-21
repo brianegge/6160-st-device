@@ -30,12 +30,10 @@ class SerialIO(threading.Thread):
     def __init__(
         self,
         port: serial.Serial,
-        min_delay: float = 0.1,
         on_initialized: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(name="serial-io", daemon=True)
         self._port = port
-        self._min_delay = min_delay
         self._on_initialized = on_initialized
         self._queue: queue.Queue[SerialCommand | None] = queue.Queue()
         self._last_time = ""
@@ -82,8 +80,6 @@ class SerialIO(threading.Thread):
             # Delay between payloads (e.g. tone-reset needs 1.5 s)
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
-            sleep(self._min_delay)
-            # Read any response the device sent back
             self._read_response(cmd.source)
 
     def _reset_device(self) -> None:
@@ -96,13 +92,20 @@ class SerialIO(threading.Thread):
     # -- Reading -----------------------------------------------------------
 
     def _read_response(self, source: str) -> None:
-        """Read and log any bytes waiting in the serial buffer."""
+        """Block for the Arduino's response, then drain any extra lines."""
+        raw = self._port.readline()  # blocks up to port.timeout
+        if raw:
+            line = raw.decode("ascii", errors="replace").strip()
+            if line:
+                log.info("<< [%s] %s", source, line)
+                self._handle_line(line)
         while self._port.in_waiting:
             raw = self._port.readline()
             if raw:
                 line = raw.decode("ascii", errors="replace").strip()
-                log.info("<< [%s] %s", source, line)
-                self._handle_line(line)
+                if line:
+                    log.info("<< [%s] %s", source, line)
+                    self._handle_line(line)
 
     def _read_unsolicited(self) -> None:
         """Read any unsolicited data that arrived while idle."""

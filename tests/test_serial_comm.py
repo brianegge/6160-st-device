@@ -13,7 +13,6 @@ from keypad6160.serial_comm import SerialIO
 
 class TestSerialIO:
     def _make_io(self, port, **kwargs):
-        kwargs.setdefault("min_delay", 0.0)
         port.timeout = kwargs.pop("timeout", 0.1)
         # Default: no bytes waiting (tests override via PropertyMock as needed)
         type(port).in_waiting = PropertyMock(return_value=0)
@@ -64,7 +63,7 @@ class TestSerialIO:
     def test_reset_toggles_dtr(self):
         port = MagicMock()
         port.timeout = 0.1
-        io = SerialIO(port, min_delay=0.0)
+        io = SerialIO(port)
         io.start()
         cmd = SerialCommand(reset=True)
         io.enqueue(cmd)
@@ -87,10 +86,9 @@ class TestSerialIO:
 
     def test_reads_response_after_write(self):
         port = MagicMock()
+        # First readline() is the blocking call; no additional lines buffered
         port.readline.return_value = b"OK\n"
         io = self._make_io(port)
-        # Override in_waiting: 5 bytes after write, then 0
-        type(port).in_waiting = PropertyMock(side_effect=[5, 0])
         cmd = SerialCommand(payloads=["F7 b=1 1=Hello\n"], source="test")
         io.enqueue(cmd)
         io.shutdown()
@@ -101,10 +99,9 @@ class TestSerialIO:
     def test_initialized_triggers_callback(self):
         port = MagicMock()
         callback = MagicMock()
+        # First readline() is the blocking call returning the init message
         port.readline.return_value = b"Arduino initialized\n"
         io = self._make_io(port, on_initialized=callback)
-        # Override: bytes waiting after write, then 0 for the rest
-        type(port).in_waiting = PropertyMock(side_effect=[6, 0])
         io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
         io.shutdown()
         io.join(timeout=2)

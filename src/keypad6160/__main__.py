@@ -25,7 +25,7 @@ def main() -> None:
     log.info("Opening serial port %s", config.serial_device)
     port = open_serial(config)
 
-    serial_io = SerialIO(port, min_delay=config.serial_min_delay)
+    serial_io = SerialIO(port)
     serial_io.start()
 
     mqtt_client = KeypadMqttClient(config, serial_io)
