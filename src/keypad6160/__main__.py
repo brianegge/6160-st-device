@@ -18,8 +18,9 @@ def main() -> None:
     config = Config.from_env()
 
     logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s [%(threadName)s]",
+        format="%(name)s: %(message)s [%(threadName)s]",
         level=getattr(logging, config.log_level.upper(), logging.INFO),
+        stream=sys.stdout,
     )
 
     log.info("Opening serial port %s", config.serial_device)
