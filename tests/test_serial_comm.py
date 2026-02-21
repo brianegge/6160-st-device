@@ -63,12 +63,13 @@ class TestSerialIO:
 
     def test_reset_toggles_dtr(self):
         port = MagicMock()
-        writer = SerialWriter(port, min_delay=0.0)
-        writer.start()
+        port.timeout = 0.1
+        io = SerialIO(port, min_delay=0.0)
+        io.start()
         cmd = SerialCommand(reset=True)
-        writer.enqueue(cmd)
-        writer.shutdown()
-        writer.join(timeout=2)
+        io.enqueue(cmd)
+        io.shutdown()
+        io.join(timeout=2)
         # DTR should have been toggled: False then True
         assert port.dtr is True
         port.write.assert_not_called()

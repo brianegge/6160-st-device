@@ -4,9 +4,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=localhost/keypad6160:latest
+Image=ghcr.io/brianegge/keypad6160:latest
+AutoUpdate=registry
+Pull=newer
 EnvironmentFile=%h/.config/containers/systemd/keypad6160.env
 AddDevice=/dev/ttyACM0
+Label=io.containers.autoupdate=registry
 # Run as non-root; the keypad user in the container is in the dialout group
 SecurityLabelDisable=true
 

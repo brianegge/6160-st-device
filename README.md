@@ -53,17 +53,32 @@ pytest
 podman build -t keypad6160:latest .
 ```
 
-## Deploy (Podman Quadlet)
+## Deploy (Raspberry Pi Zero W)
 
-Copy the quadlet files and environment template:
+Flash Raspberry Pi OS Lite (Bookworm, 32-bit) to an SD card using
+[Raspberry Pi Imager](https://www.raspberrypi.com/software/). Configure the
+hostname (`raspberrypi-zerow`), WiFi, SSH, and user `pi` in the Imager settings.
+
+After first boot, SSH in and run the setup script:
 
 ```bash
-mkdir -p ~/.config/containers/systemd
-cp quadlet/keypad6160.container ~/.config/containers/systemd/
-cp quadlet/keypad6160.env ~/.config/containers/systemd/
-# Edit ~/.config/containers/systemd/keypad6160.env with your MQTT credentials
-systemctl --user daemon-reload
+git clone https://github.com/brianegge/6160-st-device.git
+cd 6160-st-device && bash setup.sh
+```
+
+The script installs podman, copies the quadlet files to
+`~/.config/containers/systemd/`, enables the auto-update timer, and sets up
+SNMP and backups. Review the env file for MQTT settings, then start the service:
+
+```bash
 systemctl --user start keypad6160
+```
+
+The container image is pulled from `ghcr.io/brianegge/keypad6160:latest` and
+auto-updates via `podman auto-update`. Check for updates manually with:
+
+```bash
+podman auto-update --dry-run
 ```
 
 ## MQTT Topics
