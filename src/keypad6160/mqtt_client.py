@@ -160,6 +160,11 @@ class KeypadMqttClient:
             retain=True,
         )
 
+    def publish_key_event(self, key: str) -> None:
+        """Publish a key press event to MQTT."""
+        payload = json.dumps({"event_type": "key_press", "key": key})
+        self._publish(f"{self._prefix}/key/event", payload)
+
     # -- Helpers -----------------------------------------------------------
 
     def _publish(self, topic: str, payload: str, retain: bool = False) -> None:

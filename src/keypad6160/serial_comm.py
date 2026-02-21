@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_KEY_CODES: dict[int, str] = {
+    **{i: str(i) for i in range(10)},
+    0x0A: "*", 0x0B: "#",
+    0x1C: "A", 0x1D: "B", 0x1E: "C", 0x1F: "D",
+}
+
 
 class SerialIO(threading.Thread):
     """Daemon thread that owns the serial port for reading and writing."""
@@ -35,6 +41,7 @@ class SerialIO(threading.Thread):
         super().__init__(name="serial-io", daemon=True)
         self._port = port
         self._on_initialized = on_initialized
+        self.on_keypress: Callable[[str], None] | None = None
         self._queue: queue.Queue[SerialCommand | None] = queue.Queue()
         self._last_time = ""
 
@@ -122,6 +129,21 @@ class SerialIO(threading.Thread):
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
+        elif line.startswith("KEYS_"):
+            self._handle_keys(line)
+
+    def _handle_keys(self, line: str) -> None:
+        """Parse KEYS message and invoke callback for each key press."""
+        for token in line.split()[1:]:  # skip "KEYS_16[02]"
+            try:
+                code = int(token, 16)
+            except ValueError:
+                continue
+            key = _KEY_CODES.get(code)
+            if key is not None:
+                log.info("Key pressed: %s", key)
+                if self.on_keypress:
+                    self.on_keypress(key)
 
     def _update_clock(self) -> None:
         out = strftime("%a %b %e %I:%M", localtime())
