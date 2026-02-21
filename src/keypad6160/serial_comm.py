@@ -95,11 +95,11 @@ class SerialIO(threading.Thread):
         """Wait briefly for data, then drain all available lines.
 
         The Arduino does not respond to valid F7 commands, so we use a
-        short fixed delay instead of a full blocking readline.  This is
-        long enough for the Arduino to finish processing the previous
-        command before we send the next one.
+        fixed delay instead of a full blocking readline.  The delay must
+        exceed the time the Arduino takes to relay on the 4800-baud
+        keypad bus (~100 ms for a full frame).
         """
-        sleep(0.05)
+        sleep(0.2)
         while self._port.in_waiting:
             raw = self._port.readline()
             if raw:
