@@ -12,36 +12,38 @@ src/keypad6160/
   config.py        - Dataclass config loaded from KEYPAD_* environment variables
   f7_protocol.py   - Builds F7 serial commands (alarm states, text, backlight, tones, reset)
   mqtt_client.py   - Paho MQTT client: subscriptions, HA command dispatch, state publishing
-  serial_comm.py   - SerialWriter (queue-based) and SerialReader (clock + "initialized" detect) threads
+  serial_comm.py   - SerialIO: single thread for reading and writing (queue-based commands, clock, "initialized" detect)
   ha_discovery.py  - Builds HomeAssistant MQTT auto-discovery JSON payloads
 tests/             - pytest tests (run with `pytest`)
 ```
 
 ## Deployment
 
-The service runs on `pi@raspberrypi-zerow` (Raspbian Bookworm, Python 3.11, armv6l).
+The service runs on `pi@raspberrypi-zerow` (Raspbian Bookworm, Python 3.11, armv6l) as a rootless Podman container managed by a quadlet.
 
-**Current production deployment** uses a systemd system service (not containers):
+- Image: `ghcr.io/brianegge/keypad6160:latest` (built for `linux/arm/v6` and `linux/amd64`)
+- Quadlet: `~/.config/containers/systemd/keypad6160.container`
+- Environment: `~/.config/containers/systemd/keypad6160.env`
+- Auto-update: enabled via `io.containers.autoupdate=registry` label
+- CI publishes to GHCR on every push to `master` (`.github/workflows/publish.yml`)
 
-- Service file: `/etc/systemd/system/keypad6160.service`
-- Executable: `/home/pi/.local/bin/keypad6160` (pip-installed)
-- Environment: `/home/pi/6160-st-device/quadlet/keypad6160.env`
-- Runs as user `pi`, auto-restarts with 30s delay
-- The repo is cloned to `/home/pi/6160-st-device` on the Pi
-
-Deploy updates:
+Deploy updates (merge to master, then pull on the Pi):
 
 ```bash
-ssh pi@raspberrypi-zerow 'cd ~/6160-st-device && git pull && pip install --user . && sudo systemctl restart keypad6160'
+ssh pi@raspberrypi-zerow 'podman auto-update'
 ```
 
 View logs:
 
 ```bash
-ssh pi@raspberrypi-zerow 'journalctl -u keypad6160 -f'
+ssh pi@raspberrypi-zerow 'podman logs -f keypad6160'
 ```
 
-The repo also contains a Containerfile and Podman quadlet config (`quadlet/`) for container-based deployment, but these are not currently in use on the Pi.
+Restart the service:
+
+```bash
+ssh pi@raspberrypi-zerow 'systemctl --user restart keypad6160'
+```
 
 ## Hardware
 
@@ -69,6 +71,6 @@ Broker is at `mqtt.home:1883`. All topics are under the prefix configured by `KE
 ## Key conventions
 
 - All config is via `KEYPAD_*` environment variables with sensible defaults
-- Serial writes go through a single `SerialWriter` queue thread; reads happen on a separate `SerialReader` thread
+- A single `SerialIO` thread owns the serial port for both reading and writing; commands are submitted via a thread-safe queue
 - F7 commands with a non-zero tone automatically send a follow-up reset after 1.5s
 - The clock on LCD line 2 updates on every serial read timeout (~1s)
