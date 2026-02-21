@@ -17,7 +17,7 @@ from keypad6160.f7_protocol import (
 
 if TYPE_CHECKING:
     from keypad6160.config import Config
-    from keypad6160.serial_comm import SerialWriter
+    from keypad6160.serial_comm import SerialIO
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 class KeypadMqttClient:
     """Manages MQTT connection, subscriptions, and dispatches serial commands."""
 
-    def __init__(self, config: Config, writer: SerialWriter) -> None:
+    def __init__(self, config: Config, writer: SerialIO) -> None:
         self._config = config
         self._writer = writer
         self._prefix = config.mqtt_topic_prefix
@@ -130,7 +130,7 @@ class KeypadMqttClient:
     # -- Handlers ----------------------------------------------------------
 
     def _handle_mode(self, mode: str) -> None:
-        cmd = build_message(1, mode)
+        cmd = build_message(1, mode, source="mqtt:mode")
         self._writer.enqueue(cmd)
         self._publish(f"{self._prefix}/mode/state", mode, retain=True)
 
@@ -139,11 +139,11 @@ class KeypadMqttClient:
         text = data.get("text", "")
         line_no = data.get("line_no", "1")
         backlight = data.get("backlight", "1")
-        cmd = build_raw_message(line_no, text, backlight=backlight)
+        cmd = build_raw_message(line_no, text, backlight=backlight, source="mqtt:json")
         self._writer.enqueue(cmd)
 
     def _handle_line_message(self, line_no: int, text: str) -> None:
-        cmd = build_message(line_no, text)
+        cmd = build_message(line_no, text, source="mqtt:line")
         self._writer.enqueue(cmd)
 
     def _handle_reset(self) -> None:
@@ -152,7 +152,7 @@ class KeypadMqttClient:
 
     def _handle_backlight(self, payload: str) -> None:
         on = payload.upper() in ("ON", "1", "TRUE")
-        cmd = build_backlight_command(on)
+        cmd = build_backlight_command(on, source="mqtt:backlight")
         self._writer.enqueue(cmd)
         self._publish(
             f"{self._prefix}/backlight/state",
