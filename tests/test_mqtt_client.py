@@ -118,6 +118,14 @@ class TestMqttCallbacks:
         mqtt_client._on_message(mqtt_client._client, None, msg)
         writer.enqueue.assert_not_called()
 
+    def test_publish_key_event(self, mqtt_client):
+        mqtt_client.publish_key_event("5")
+        mqtt_client._client.publish.assert_called_once()
+        call_args = mqtt_client._client.publish.call_args
+        assert call_args[0][0] == "test/6160/key/event"
+        payload = json.loads(call_args[0][1])
+        assert payload == {"event_type": "key_press", "key": "5"}
+
 
 class TestHaDiscovery:
     def test_discovery_messages(self):
@@ -125,12 +133,13 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 4
+        assert len(messages) == 5
         topics = [t for t, _ in messages]
         assert "homeassistant/select/keypad_6160_mode/config" in topics
         assert "homeassistant/light/keypad_6160_backlight/config" in topics
         assert "homeassistant/text/keypad_6160_message/config" in topics
         assert "homeassistant/button/keypad_6160_reset/config" in topics
+        assert "homeassistant/event/keypad_6160_keypress/config" in topics
 
         # Verify JSON payloads are valid
         for _, payload in messages:

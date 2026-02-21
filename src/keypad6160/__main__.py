@@ -26,9 +26,9 @@ def main() -> None:
     port = open_serial(config)
 
     serial_io = SerialIO(port)
-    serial_io.start()
-
     mqtt_client = KeypadMqttClient(config, serial_io)
+    serial_io.on_keypress = mqtt_client.publish_key_event
+    serial_io.start()
 
     # -- Signal handling ---------------------------------------------------
     def _shutdown(signum: int, frame: object) -> None:

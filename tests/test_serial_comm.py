@@ -108,3 +108,78 @@ class TestSerialIO:
         io.shutdown()
         io.join(timeout=2)
         callback.assert_called_once()
+
+    def test_handle_keys_single(self):
+        port = MagicMock()
+        callback = MagicMock()
+        port.readline.return_value = b"KEYS_16[01] 0x02\n"
+        io = self._make_io(port)
+        io.on_keypress = callback
+        type(port).in_waiting = PropertyMock(side_effect=[10, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        callback.assert_called_once_with("2")
+
+    def test_handle_keys_multiple(self):
+        port = MagicMock()
+        callback = MagicMock()
+        port.readline.return_value = b"KEYS_16[02] 0x01 0x05\n"
+        io = self._make_io(port)
+        io.on_keypress = callback
+        type(port).in_waiting = PropertyMock(side_effect=[20, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        assert callback.call_count == 2
+        callback.assert_any_call("1")
+        callback.assert_any_call("5")
+
+    def test_handle_keys_function_keys(self):
+        port = MagicMock()
+        callback = MagicMock()
+        port.readline.return_value = b"KEYS_16[01] 0x1C\n"
+        io = self._make_io(port)
+        io.on_keypress = callback
+        type(port).in_waiting = PropertyMock(side_effect=[10, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        callback.assert_called_once_with("A")
+
+    def test_handle_keys_star_and_hash(self):
+        port = MagicMock()
+        callback = MagicMock()
+        port.readline.return_value = b"KEYS_16[02] 0x0A 0x0B\n"
+        io = self._make_io(port)
+        io.on_keypress = callback
+        type(port).in_waiting = PropertyMock(side_effect=[20, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        assert callback.call_count == 2
+        callback.assert_any_call("*")
+        callback.assert_any_call("#")
+
+    def test_handle_keys_unknown_code_ignored(self):
+        port = MagicMock()
+        callback = MagicMock()
+        port.readline.return_value = b"KEYS_16[01] 0xFF\n"
+        io = self._make_io(port)
+        io.on_keypress = callback
+        type(port).in_waiting = PropertyMock(side_effect=[10, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        callback.assert_not_called()
+
+    def test_handle_keys_no_callback(self):
+        """KEYS message without callback set should not raise."""
+        port = MagicMock()
+        port.readline.return_value = b"KEYS_16[01] 0x02\n"
+        io = self._make_io(port)
+        type(port).in_waiting = PropertyMock(side_effect=[10, 0])
+        io.enqueue(SerialCommand(payloads=["test\n"], source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        assert not io.is_alive()

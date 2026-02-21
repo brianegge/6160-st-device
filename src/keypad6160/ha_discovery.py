@@ -75,4 +75,17 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
         }),
     ))
 
+    # Keypress event
+    messages.append((
+        "homeassistant/event/keypad_6160_keypress/config",
+        json.dumps({
+            "name": "Keypress",
+            "unique_id": "keypad_6160_keypress",
+            "state_topic": f"{prefix}/key/event",
+            "event_types": ["key_press"],
+            "availability_topic": f"{prefix}/status",
+            "device": device_info,
+        }),
+    ))
+
     return messages
