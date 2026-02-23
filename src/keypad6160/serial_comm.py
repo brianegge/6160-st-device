@@ -12,14 +12,12 @@ import logging
 import queue
 import threading
 from time import localtime, sleep, strftime
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 import serial
 
+from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand, build_message
-
-if TYPE_CHECKING:
-    from keypad6160.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -37,9 +35,11 @@ class SerialIO(threading.Thread):
         self,
         port: serial.Serial,
         on_initialized: Callable[[], None] | None = None,
+        config: Config | None = None,
     ) -> None:
         super().__init__(name="serial-io", daemon=True)
         self._port = port
+        self._config = config
         self._on_initialized = on_initialized
         self.on_keypress: Callable[[str], None] | None = None
         self._queue: queue.Queue[SerialCommand | None] = queue.Queue()
@@ -56,6 +56,40 @@ class SerialIO(threading.Thread):
     def run(self) -> None:
         while True:
             try:
+                self._run_loop()
+                break  # clean shutdown via sentinel
+            except serial.SerialException:
+                log.exception("Serial port error, attempting reconnect")
+                self._reconnect()
+            except OSError:
+                log.exception("OS error on serial port, attempting reconnect")
+                self._reconnect()
+
+    def _reconnect(self) -> None:
+        """Close the port and reopen it after a delay."""
+        try:
+            self._port.close()
+        except Exception:
+            pass
+        if self._config is None:
+            log.error("No config available for reconnect, giving up")
+            return
+        while True:
+            sleep(5)
+            try:
+                self._port = serial.Serial(
+                    port=self._config.serial_device,
+                    baudrate=self._config.serial_baudrate,
+                    timeout=self._config.serial_timeout,
+                )
+                log.info("Reconnected to %s", self._config.serial_device)
+                return
+            except (serial.SerialException, OSError):
+                log.warning("Reconnect failed, retrying in 5s")
+
+    def _run_loop(self) -> None:
+        while True:
+            try:
                 cmd = self._queue.get(timeout=self._port.timeout)
             except queue.Empty:
                 # No queued command — read unsolicited data and update clock
@@ -65,9 +99,11 @@ class SerialIO(threading.Thread):
 
             if cmd is None:
                 log.info("SerialIO received shutdown sentinel")
-                break
+                return
             try:
                 self._execute(cmd)
+            except (serial.SerialException, OSError):
+                raise  # bubble up for reconnect
             except Exception:
                 log.exception("Error writing serial command")
 

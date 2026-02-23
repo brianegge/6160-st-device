@@ -106,6 +106,19 @@ def build_backlight_command(on: bool, source: str = "") -> SerialCommand:
     return SerialCommand(payloads=[payload], source=source)
 
 
+def build_tone_command(tone: int, source: str = "") -> SerialCommand:
+    """Build an F7 command that plays a tone (0–7) with auto-reset after 1.5 s."""
+    tone = max(0, min(7, tone))
+    payload = f"F7 t={tone}\n"
+    if tone > 0:
+        return SerialCommand(
+            payloads=[payload, "F7 t=0\n"],
+            delays=[1.5],
+            source=source,
+        )
+    return SerialCommand(payloads=[payload], source=source)
+
+
 def build_reset_command() -> SerialCommand:
     """Build a command that resets the Arduino by toggling DTR."""
     return SerialCommand(reset=True, source="reset")

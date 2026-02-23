@@ -7,6 +7,7 @@ import threading
 import time
 from unittest.mock import MagicMock, PropertyMock, call, patch
 
+from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand
 from keypad6160.serial_comm import SerialIO
 
@@ -183,3 +184,35 @@ class TestSerialIO:
         io.shutdown()
         io.join(timeout=2)
         assert not io.is_alive()
+
+    @patch("keypad6160.serial_comm.serial.Serial")
+    @patch("keypad6160.serial_comm.sleep")
+    def test_reconnect_after_serial_error(self, mock_sleep, mock_serial_cls):
+        """SerialIO reconnects when a SerialException occurs during write."""
+        import serial as ser
+
+        port = MagicMock()
+        port.timeout = 0.1
+        type(port).in_waiting = PropertyMock(return_value=0)
+        # First write raises, triggering reconnect
+        port.write.side_effect = ser.SerialException("disconnected")
+
+        new_port = MagicMock()
+        new_port.timeout = 0.1
+        type(new_port).in_waiting = PropertyMock(return_value=0)
+        mock_serial_cls.return_value = new_port
+
+        config = Config(serial_device="/dev/ttyTest")
+        io = SerialIO(port, config=config)
+        io.start()
+
+        io.enqueue(SerialCommand(payloads=["bad\n"]))
+        # After reconnect, enqueue a good command and shutdown
+        time.sleep(0.5)
+        io.enqueue(SerialCommand(payloads=["good\n"]))
+        io.shutdown()
+        io.join(timeout=5)
+
+        # Verify reconnect happened
+        mock_serial_cls.assert_called_once()
+        new_port.write.assert_called_with(b"good\n")

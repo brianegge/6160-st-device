@@ -88,4 +88,19 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
         }),
     ))
 
+    # Uptime sensor
+    messages.append((
+        "homeassistant/sensor/keypad_6160_uptime/config",
+        json.dumps({
+            "name": "Keypad Uptime",
+            "unique_id": "keypad_6160_uptime",
+            "state_topic": f"{prefix}/uptime/state",
+            "unit_of_measurement": "s",
+            "device_class": "duration",
+            "state_class": "total_increasing",
+            "availability_topic": f"{prefix}/status",
+            "device": device_info,
+        }),
+    ))
+
     return messages

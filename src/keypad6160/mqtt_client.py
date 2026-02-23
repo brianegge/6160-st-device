@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
@@ -13,6 +15,7 @@ from keypad6160.f7_protocol import (
     build_message,
     build_raw_message,
     build_reset_command,
+    build_tone_command,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +48,9 @@ class KeypadMqttClient:
             retain=True,
         )
 
+        self._start_time = time.monotonic()
+        self._uptime_timer: threading.Timer | None = None
+
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
@@ -60,6 +66,8 @@ class KeypadMqttClient:
 
     def disconnect(self) -> None:
         """Publish offline status and disconnect."""
+        if self._uptime_timer:
+            self._uptime_timer.cancel()
         self._publish(f"{self._prefix}/status", "offline", retain=True)
         self._client.disconnect()
 
@@ -87,6 +95,8 @@ class KeypadMqttClient:
         # Publish online status
         self._publish(f"{self._prefix}/status", "online", retain=True)
 
+        self._start_uptime_publishing()
+
         # Subscribe to command topics
         topics = [
             (f"{self._prefix}/mode/set", 1),
@@ -95,6 +105,7 @@ class KeypadMqttClient:
             (f"{self._prefix}/message/2/set", 1),
             (f"{self._prefix}/backlight/set", 1),
             (f"{self._prefix}/reset/set", 1),
+            (f"{self._prefix}/tone/set", 1),
         ]
         client.subscribe(topics)
         log.info("Subscribed to %d topics", len(topics))
@@ -120,6 +131,8 @@ class KeypadMqttClient:
                 self._handle_line_message(2, payload)
             elif topic == f"{self._prefix}/backlight/set":
                 self._handle_backlight(payload)
+            elif topic == f"{self._prefix}/tone/set":
+                self._handle_tone(payload)
             elif topic == f"{self._prefix}/reset/set":
                 self._handle_reset()
             else:
@@ -146,6 +159,11 @@ class KeypadMqttClient:
         cmd = build_message(line_no, text, source="mqtt:line")
         self._writer.enqueue(cmd)
 
+    def _handle_tone(self, payload: str) -> None:
+        tone = int(payload)
+        cmd = build_tone_command(tone, source="mqtt:tone")
+        self._writer.enqueue(cmd)
+
     def _handle_reset(self) -> None:
         cmd = build_reset_command()
         self._writer.enqueue(cmd)
@@ -164,6 +182,18 @@ class KeypadMqttClient:
         """Publish a key press event to MQTT."""
         payload = json.dumps({"event_type": "key_press", "key": key})
         self._publish(f"{self._prefix}/key/event", payload)
+
+    # -- Uptime ------------------------------------------------------------
+
+    def _start_uptime_publishing(self) -> None:
+        self._publish_uptime()
+
+    def _publish_uptime(self) -> None:
+        uptime = int(time.monotonic() - self._start_time)
+        self._publish(f"{self._prefix}/uptime/state", str(uptime))
+        self._uptime_timer = threading.Timer(60, self._publish_uptime)
+        self._uptime_timer.daemon = True
+        self._uptime_timer.start()
 
     # -- Helpers -----------------------------------------------------------
 
