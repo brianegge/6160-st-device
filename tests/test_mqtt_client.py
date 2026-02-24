@@ -10,6 +10,7 @@ import pytest
 from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand
 from keypad6160.mqtt_client import KeypadMqttClient
+from keypad6160.notice_manager import NoticeManager
 
 
 @pytest.fixture
@@ -23,9 +24,14 @@ def writer():
 
 
 @pytest.fixture
-def mqtt_client(config, writer):
+def notices():
+    return NoticeManager()
+
+
+@pytest.fixture
+def mqtt_client(config, writer, notices):
     with patch("keypad6160.mqtt_client.mqtt.Client"):
-        client = KeypadMqttClient(config, writer)
+        client = KeypadMqttClient(config, writer, notices=notices)
     return client
 
 
@@ -143,6 +149,41 @@ class TestMqttCallbacks:
         assert call_args[0][0] == "test/6160/key/event"
         payload = json.loads(call_args[0][1])
         assert payload == {"event_type": "key_press", "key": "5"}
+
+
+    def test_on_message_dispatches_notice_set_plain(self, mqtt_client, notices):
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/set"
+        msg.payload = b"Washer Done"
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 1
+
+    def test_on_message_dispatches_notice_set_json(self, mqtt_client, notices):
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/set"
+        msg.payload = json.dumps({"id": "washer", "message": "Washer Done"}).encode()
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 1
+
+    def test_on_message_dispatches_notice_clear(self, mqtt_client, notices):
+        notices.set("Washer Done", notice_id="washer", ttl=0)
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/clear"
+        msg.payload = b"washer"
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 0
+
+    def test_notice_set_json_with_ttl(self, mqtt_client, notices):
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/set"
+        msg.payload = json.dumps({"id": "timer", "message": "Timer Done", "ttl": 120}).encode()
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 1
+
+    def test_notice_set_json_without_id_defaults_transient(self, mqtt_client, notices):
+        """JSON payload without 'id' should default to 60s TTL."""
+        mqtt_client._handle_notice_set(json.dumps({"message": "Quick Note"}))
+        assert notices.active_count == 1
 
 
 class TestHaDiscovery:

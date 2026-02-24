@@ -20,6 +20,7 @@ from keypad6160.f7_protocol import (
 
 if TYPE_CHECKING:
     from keypad6160.config import Config
+    from keypad6160.notice_manager import NoticeManager
     from keypad6160.serial_comm import SerialIO
 
 log = logging.getLogger(__name__)
@@ -28,9 +29,10 @@ log = logging.getLogger(__name__)
 class KeypadMqttClient:
     """Manages MQTT connection, subscriptions, and dispatches serial commands."""
 
-    def __init__(self, config: Config, writer: SerialIO) -> None:
+    def __init__(self, config: Config, writer: SerialIO, notices: NoticeManager | None = None) -> None:
         self._config = config
         self._writer = writer
+        self._notices = notices
         self._prefix = config.mqtt_topic_prefix
 
         self._client = mqtt.Client(
@@ -106,6 +108,8 @@ class KeypadMqttClient:
             (f"{self._prefix}/backlight/set", 1),
             (f"{self._prefix}/reset/set", 1),
             (f"{self._prefix}/tone/set", 1),
+            (f"{self._prefix}/notice/set", 1),
+            (f"{self._prefix}/notice/clear", 1),
         ]
         client.subscribe(topics)
         log.info("Subscribed to %d topics", len(topics))
@@ -135,6 +139,10 @@ class KeypadMqttClient:
                 self._handle_tone(payload)
             elif topic == f"{self._prefix}/reset/set":
                 self._handle_reset()
+            elif topic == f"{self._prefix}/notice/set":
+                self._handle_notice_set(payload)
+            elif topic == f"{self._prefix}/notice/clear":
+                self._handle_notice_clear(payload)
             else:
                 log.warning("Unhandled topic: %s", topic)
         except Exception:
@@ -177,6 +185,25 @@ class KeypadMqttClient:
             "ON" if on else "OFF",
             retain=True,
         )
+
+    def _handle_notice_set(self, payload: str) -> None:
+        if self._notices is None:
+            return
+        try:
+            data = json.loads(payload)
+            message = data["message"]
+            notice_id = data.get("id")
+            ttl = data.get("ttl", 0 if notice_id is not None else 60)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            message = payload
+            notice_id = None
+            ttl = 60
+        self._notices.set(message, notice_id=notice_id, ttl=ttl)
+
+    def _handle_notice_clear(self, payload: str) -> None:
+        if self._notices is None:
+            return
+        self._notices.clear(payload)
 
     def publish_key_event(self, key: str) -> None:
         """Publish a key press event to MQTT."""

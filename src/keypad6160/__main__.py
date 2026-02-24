@@ -10,6 +10,7 @@ from keypad6160.config import Config
 from keypad6160.ha_discovery import build_discovery_messages
 from keypad6160.health import start_health_server
 from keypad6160.mqtt_client import KeypadMqttClient
+from keypad6160.notice_manager import NoticeManager
 from keypad6160.serial_comm import SerialIO, open_serial
 
 log = logging.getLogger(__name__)
@@ -27,8 +28,10 @@ def main() -> None:
     log.info("Opening serial port %s", config.serial_device)
     port = open_serial(config)
 
+    notices = NoticeManager()
     serial_io = SerialIO(port, config=config)
-    mqtt_client = KeypadMqttClient(config, serial_io)
+    serial_io._notice_manager = notices
+    mqtt_client = KeypadMqttClient(config, serial_io, notices=notices)
     serial_io.on_keypress = mqtt_client.publish_key_event
     serial_io.start()
 
