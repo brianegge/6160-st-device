@@ -208,6 +208,29 @@ class TestSerialIO:
         io.join(timeout=2)
         assert port.write.call_count == 2
 
+    def test_ensure_both_lines_on_line2_only(self):
+        """A line-2-only command should be rewritten to include line 1."""
+        port = MagicMock()
+        io = self._make_io(port)
+        # Set line 1 first, then update line 2 only
+        io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 1=Raspberry Pi OK \n"]))
+        io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 2=Mon Feb 23  6:30\n"]))
+        io.shutdown()
+        io.join(timeout=2)
+        # The second write should contain both 1= and 2=
+        last_write = port.write.call_args_list[-1][0][0].decode()
+        assert "1=Raspberry Pi OK " in last_write
+        assert "2=Mon Feb 23  6:30" in last_write
+
+    def test_ensure_both_lines_passthrough_no_line(self):
+        """Payloads without line text (e.g. tone reset) pass through unchanged."""
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(SerialCommand(payloads=["F7 t=0\n"]))
+        io.shutdown()
+        io.join(timeout=2)
+        port.write.assert_called_once_with(b"F7 t=0\n")
+
     def test_coalescing_preserves_no_key_commands(self):
         """Commands without a coalesce_key are never dropped."""
         port = MagicMock()
