@@ -21,6 +21,38 @@ from keypad6160.f7_protocol import SerialCommand, build_message
 
 log = logging.getLogger(__name__)
 
+
+class _CoalescingQueue:
+    """Thread-safe queue that drops stale entries sharing a coalesce_key.
+
+    When a new item with a non-empty coalesce_key is put(), any pending
+    item with the same key is removed first.  This prevents rapid-fire
+    updates (e.g. MQTT line-2 messages) from piling up and overwhelming
+    the 4800-baud keybus.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[SerialCommand | None] = []
+        self._lock = threading.Lock()
+        self._not_empty = threading.Condition(self._lock)
+
+    def put(self, item: SerialCommand | None) -> None:
+        with self._not_empty:
+            if item is not None and item.coalesce_key:
+                self._items = [
+                    i for i in self._items
+                    if i is None or i.coalesce_key != item.coalesce_key
+                ]
+            self._items.append(item)
+            self._not_empty.notify()
+
+    def get(self, timeout: float | None = None) -> SerialCommand | None:
+        with self._not_empty:
+            while not self._items:
+                if not self._not_empty.wait(timeout):
+                    raise queue.Empty
+            return self._items.pop(0)
+
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
     0x0A: "*", 0x0B: "#",
@@ -42,7 +74,7 @@ class SerialIO(threading.Thread):
         self._config = config
         self._on_initialized = on_initialized
         self.on_keypress: Callable[[str], None] | None = None
-        self._queue: queue.Queue[SerialCommand | None] = queue.Queue()
+        self._queue: _CoalescingQueue = _CoalescingQueue()
         self._last_time = ""
 
     def enqueue(self, cmd: SerialCommand) -> None:

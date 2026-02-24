@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, PropertyMock, call, patch
 
 from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand
-from keypad6160.serial_comm import SerialIO
+from keypad6160.serial_comm import SerialIO, _CoalescingQueue
 
 
 class TestSerialIO:
@@ -184,6 +184,39 @@ class TestSerialIO:
         io.shutdown()
         io.join(timeout=2)
         assert not io.is_alive()
+
+    def test_coalescing_drops_stale_line_messages(self):
+        """Rapid MQTT updates for the same line should coalesce to the latest."""
+        port = MagicMock()
+        io = self._make_io(port)
+        # Enqueue three line-2 messages rapidly; only the last should be sent
+        io.enqueue(SerialCommand(payloads=["F7 b=1 2=First\n"], coalesce_key="line:2"))
+        io.enqueue(SerialCommand(payloads=["F7 b=1 2=Second\n"], coalesce_key="line:2"))
+        io.enqueue(SerialCommand(payloads=["F7 b=1 2=Third\n"], coalesce_key="line:2"))
+        io.shutdown()
+        io.join(timeout=2)
+        # Only "Third" should have been written
+        port.write.assert_called_once_with(b"F7 b=1 2=Third\n")
+
+    def test_coalescing_preserves_different_keys(self):
+        """Commands with different coalesce_keys are not dropped."""
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(SerialCommand(payloads=["F7 b=1 1=Line1\n"], coalesce_key="line:1"))
+        io.enqueue(SerialCommand(payloads=["F7 b=1 2=Line2\n"], coalesce_key="line:2"))
+        io.shutdown()
+        io.join(timeout=2)
+        assert port.write.call_count == 2
+
+    def test_coalescing_preserves_no_key_commands(self):
+        """Commands without a coalesce_key are never dropped."""
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(SerialCommand(payloads=["F7 t=1\n"]))
+        io.enqueue(SerialCommand(payloads=["F7 t=2\n"]))
+        io.shutdown()
+        io.join(timeout=2)
+        assert port.write.call_count == 2
 
     @patch("keypad6160.serial_comm.serial.Serial")
     @patch("keypad6160.serial_comm.sleep")
