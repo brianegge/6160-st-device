@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 from time import localtime, sleep, strftime
 from typing import Callable
@@ -20,6 +21,41 @@ from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand, build_message
 
 log = logging.getLogger(__name__)
+
+
+class _CoalescingQueue:
+    """Thread-safe queue that drops stale entries sharing a coalesce_key.
+
+    When a new item with a non-empty coalesce_key is put(), any pending
+    item with the same key is removed first.  This prevents rapid-fire
+    updates (e.g. MQTT line-2 messages) from piling up and overwhelming
+    the 4800-baud keybus.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[SerialCommand | None] = []
+        self._lock = threading.Lock()
+        self._not_empty = threading.Condition(self._lock)
+
+    def put(self, item: SerialCommand | None) -> None:
+        with self._not_empty:
+            if item is not None and item.coalesce_key:
+                self._items = [
+                    i for i in self._items
+                    if i is None or i.coalesce_key != item.coalesce_key
+                ]
+            self._items.append(item)
+            self._not_empty.notify()
+
+    def get(self, timeout: float | None = None) -> SerialCommand | None:
+        with self._not_empty:
+            while not self._items:
+                if not self._not_empty.wait(timeout):
+                    raise queue.Empty
+            return self._items.pop(0)
+
+# Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
+_LINE_RE = re.compile(r" ([12])=(.{16})")
 
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
@@ -42,8 +78,9 @@ class SerialIO(threading.Thread):
         self._config = config
         self._on_initialized = on_initialized
         self.on_keypress: Callable[[str], None] | None = None
-        self._queue: queue.Queue[SerialCommand | None] = queue.Queue()
+        self._queue: _CoalescingQueue = _CoalescingQueue()
         self._last_time = ""
+        self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -114,6 +151,7 @@ class SerialIO(threading.Thread):
             self._reset_device()
             return
         for i, payload in enumerate(cmd.payloads):
+            payload = self._ensure_both_lines(payload)
             if not cmd.quiet:
                 log.info(">> [%s] %s", cmd.source, payload.strip())
             else:
@@ -124,6 +162,22 @@ class SerialIO(threading.Thread):
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
             self._read_response(cmd.source)
+
+    def _ensure_both_lines(self, payload: str) -> str:
+        """Rewrite an F7 payload to always include both 1= and 2= fields.
+
+        The Arduino parser can misinterpret parameters like ``c=1`` as
+        line-1 display text when only one line field is present.  By
+        always sending both lines we eliminate the ambiguity.
+        """
+        matches = list(_LINE_RE.finditer(payload))
+        if not matches:
+            return payload  # no line text (e.g. tone reset)
+        for m in matches:
+            self._display[int(m.group(1))] = m.group(2)
+        # Everything between "F7 " and the first line field is flags/args.
+        args = payload[3:matches[0].start()].rstrip()
+        return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
 
     def _reset_device(self) -> None:
         """Reset the Arduino by toggling the DTR line."""

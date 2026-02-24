@@ -31,6 +31,7 @@ class SerialCommand:
     quiet: bool = False
     reset: bool = False
     source: str = ""
+    coalesce_key: str = ""
 
 
 # Maps well-known alarm text to F7 flag strings.
@@ -76,6 +77,7 @@ def build_message(line_no: int | str, text: str, quiet: bool = False, source: st
         for part in args.split()
     )
 
+    key = f"line:{line_no}"
     if has_tone:
         reset_payload = "F7 t=0\n"
         return SerialCommand(
@@ -83,8 +85,9 @@ def build_message(line_no: int | str, text: str, quiet: bool = False, source: st
             delays=[1.5],
             quiet=quiet,
             source=source,
+            coalesce_key=key,
         )
-    return SerialCommand(payloads=[payload], quiet=quiet, source=source)
+    return SerialCommand(payloads=[payload], quiet=quiet, source=source, coalesce_key=key)
 
 
 def build_raw_message(
@@ -97,7 +100,7 @@ def build_raw_message(
     text = shorten(text)
     args = f"b={backlight} "
     payload = f"F7 {args}{line_no}={text:16.16}\n"
-    return SerialCommand(payloads=[payload], source=source)
+    return SerialCommand(payloads=[payload], source=source, coalesce_key=f"line:{line_no}")
 
 
 def build_backlight_command(on: bool, source: str = "") -> SerialCommand:
