@@ -12,13 +12,16 @@ import logging
 import queue
 import re
 import threading
-from time import localtime, sleep, strftime
-from typing import Callable
+from time import sleep
+from typing import TYPE_CHECKING, Callable
 
 import serial
 
 from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand, build_message
+
+if TYPE_CHECKING:
+    from keypad6160.notice_manager import NoticeManager
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +82,8 @@ class SerialIO(threading.Thread):
         self._on_initialized = on_initialized
         self.on_keypress: Callable[[str], None] | None = None
         self._queue: _CoalescingQueue = _CoalescingQueue()
-        self._last_time = ""
+        self._notice_manager: NoticeManager | None = None
+        self._last_line2 = ""
         self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
 
     def enqueue(self, cmd: SerialCommand) -> None:
@@ -131,7 +135,7 @@ class SerialIO(threading.Thread):
             except queue.Empty:
                 # No queued command — read unsolicited data and update clock
                 self._read_unsolicited()
-                self._update_clock()
+                self._update_line2()
                 continue
 
             if cmd is None:
@@ -235,11 +239,13 @@ class SerialIO(threading.Thread):
                 if self.on_keypress:
                     self.on_keypress(key)
 
-    def _update_clock(self) -> None:
-        out = strftime("%a %b %e %I:%M", localtime())
-        if out != self._last_time:
-            self._last_time = out
-            self.enqueue(build_message(2, out, quiet=True, source="clock"))
+    def _update_line2(self) -> None:
+        if self._notice_manager is None:
+            return
+        text = self._notice_manager.get_current_display()
+        if text != self._last_line2:
+            self._last_line2 = text
+            self.enqueue(build_message(2, text, quiet=True, source="notice"))
 
 
 def open_serial(config: Config) -> serial.Serial:
