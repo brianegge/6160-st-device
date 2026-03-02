@@ -173,6 +173,14 @@ class TestMqttCallbacks:
         mqtt_client._on_message(mqtt_client._client, None, msg)
         assert notices.active_count == 0
 
+    def test_on_message_dispatches_notice_clear_json(self, mqtt_client, notices):
+        notices.set("Washer Done", notice_id="washer", ttl=0)
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/clear"
+        msg.payload = json.dumps({"id": "washer"}).encode()
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 0
+
     def test_notice_set_json_with_ttl(self, mqtt_client, notices):
         msg = MagicMock()
         msg.topic = "test/6160/notice/set"

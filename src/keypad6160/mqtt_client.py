@@ -203,7 +203,12 @@ class KeypadMqttClient:
     def _handle_notice_clear(self, payload: str) -> None:
         if self._notices is None:
             return
-        self._notices.clear(payload)
+        try:
+            data = json.loads(payload)
+            notice_id = data.get("id", payload)
+        except (json.JSONDecodeError, TypeError):
+            notice_id = payload
+        self._notices.clear(notice_id)
 
     def publish_key_event(self, key: str) -> None:
         """Publish a key press event to MQTT."""
