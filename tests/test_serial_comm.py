@@ -222,14 +222,17 @@ class TestSerialIO:
         assert "1=Raspberry Pi OK " in last_write
         assert "2=Mon Feb 23  6:30" in last_write
 
-    def test_ensure_both_lines_passthrough_no_line(self):
-        """Payloads without line text (e.g. tone reset) pass through unchanged."""
+    def test_ensure_both_lines_attaches_display_to_bare_flags(self):
+        """Bare flag commands (e.g. tone reset) get current display lines attached."""
         port = MagicMock()
         io = self._make_io(port)
         io.enqueue(SerialCommand(payloads=["F7 t=0\n"]))
         io.shutdown()
         io.join(timeout=2)
-        port.write.assert_called_once_with(b"F7 t=0\n")
+        written = port.write.call_args[0][0].decode()
+        assert "t=0" in written
+        assert "1=" in written
+        assert "2=" in written
 
     def test_coalescing_preserves_no_key_commands(self):
         """Commands without a coalesce_key are never dropped."""
