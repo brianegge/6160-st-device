@@ -118,8 +118,9 @@ def build_tone_command(tone: int, source: str = "") -> SerialCommand:
             payloads=[payload, "F7 t=0\n"],
             delays=[1.5],
             source=source,
+            coalesce_key="tone",
         )
-    return SerialCommand(payloads=[payload], source=source)
+    return SerialCommand(payloads=[payload], source=source, coalesce_key="tone")
 
 
 def build_reset_command() -> SerialCommand:

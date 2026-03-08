@@ -118,11 +118,13 @@ class TestBuildToneCommand:
         assert cmd.payloads[0] == "F7 t=1\n"
         assert cmd.payloads[1] == "F7 t=0\n"
         assert cmd.delays == [1.5]
+        assert cmd.coalesce_key == "tone"
 
     def test_tone_zero_no_reset(self):
         cmd = build_tone_command(0)
         assert len(cmd.payloads) == 1
         assert cmd.payloads[0] == "F7 t=0\n"
+        assert cmd.coalesce_key == "tone"
 
     def test_tone_clamped_high(self):
         cmd = build_tone_command(10)
