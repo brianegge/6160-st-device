@@ -43,7 +43,11 @@ class TestSerialIO:
         io.join(timeout=2)
         assert port.write.call_count == 2
         port.write.assert_any_call(b"F7 t=2 1=Armed\n")
-        port.write.assert_any_call(b"F7 t=0\n")
+        # Bare flag command gets display lines attached
+        second_write = port.write.call_args_list[1][0][0].decode()
+        assert "t=0" in second_write
+        assert "1=" in second_write
+        assert "2=" in second_write
 
     def test_shutdown_sentinel(self):
         port = MagicMock()

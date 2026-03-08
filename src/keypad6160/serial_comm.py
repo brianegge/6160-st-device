@@ -174,8 +174,14 @@ class SerialIO(threading.Thread):
         line-1 display text when only one line field is present.  By
         always sending both lines we eliminate the ambiguity.
         """
+        if not payload.startswith("F7 "):
+            return payload
         matches = list(_LINE_RE.finditer(payload))
         if not matches:
+            # If the payload contains a short line field (e.g. "1=Hello")
+            # that didn't match the 16-char regex, leave it unchanged.
+            if " 1=" in payload or " 2=" in payload:
+                return payload
             # Bare flag commands (e.g. tone set/reset) — attach current
             # display lines so the Arduino receives a complete F7 frame.
             args = payload[3:].rstrip()
