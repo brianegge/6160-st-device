@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from keypad6160 import __version__
+
 if TYPE_CHECKING:
     from keypad6160.config import Config
 
@@ -84,6 +86,34 @@ def build_discovery_messages(config: Config) -> list[tuple[str, str]]:
             "state_topic": f"{prefix}/key/event",
             "event_types": ["key_press"],
             "availability_topic": f"{prefix}/status",
+            "device": device_info,
+        }),
+    ))
+
+    # Status binary sensor (uses LWT)
+    messages.append((
+        "homeassistant/binary_sensor/keypad_6160_status/config",
+        json.dumps({
+            "name": "Keypad Status",
+            "unique_id": "keypad_6160_status",
+            "state_topic": f"{prefix}/status",
+            "payload_on": "online",
+            "payload_off": "offline",
+            "device_class": "connectivity",
+            "device": device_info,
+        }),
+    ))
+
+    # Version sensor
+    messages.append((
+        "homeassistant/sensor/keypad_6160_version/config",
+        json.dumps({
+            "name": "Keypad Version",
+            "unique_id": "keypad_6160_version",
+            "state_topic": f"{prefix}/version/state",
+            "availability_topic": f"{prefix}/status",
+            "entity_category": "diagnostic",
+            "icon": "mdi:tag",
             "device": device_info,
         }),
     ))

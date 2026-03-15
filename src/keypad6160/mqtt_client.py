@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 
+from keypad6160 import __version__
 from keypad6160.f7_protocol import (
     build_backlight_command,
     build_message,
@@ -94,8 +95,9 @@ class KeypadMqttClient:
 
         log.info("Connected to MQTT broker")
 
-        # Publish online status
+        # Publish online status and version
         self._publish(f"{self._prefix}/status", "online", retain=True)
+        self._publish(f"{self._prefix}/version/state", __version__, retain=True)
 
         self._start_uptime_publishing()
 
