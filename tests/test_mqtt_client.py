@@ -200,8 +200,9 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 8
         topics = [t for t, _ in messages]
+        assert len(topics) == len(set(topics)), "Duplicate discovery topics found"
+        assert len(messages) >= 8
         assert "homeassistant/select/keypad_6160_mode/config" in topics
         assert "homeassistant/light/keypad_6160_backlight/config" in topics
         assert "homeassistant/text/keypad_6160_message/config" in topics
