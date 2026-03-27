@@ -194,6 +194,77 @@ class TestMqttCallbacks:
         assert notices.active_count == 1
 
 
+class TestOnConnect:
+    def _make_rc(self, failure=False):
+        rc = MagicMock()
+        rc.is_failure = failure
+        return rc
+
+    def test_first_connect_does_not_republish_discovery(self, mqtt_client):
+        """First _on_connect should NOT republish discovery (avoids double-publish)."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        # Should publish status + version + uptime, but NOT discovery
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" not in topics
+        assert "test/6160/status" in topics
+
+    def test_reconnect_republishes_discovery(self, mqtt_client):
+        """Subsequent _on_connect (reconnect) should republish stored discovery."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+
+        # First connect — consumes the flag
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        mqtt_client._client.publish.reset_mock()
+
+        # Second connect — should republish discovery
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" in topics
+
+    def test_reconnect_without_discovery_messages_is_noop(self, mqtt_client):
+        """Reconnect with empty discovery list should not error."""
+        # First connect
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        mqtt_client._client.publish.reset_mock()
+
+        # Reconnect with no stored messages
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        # Only status/version/uptime, no discovery
+        assert all("config" not in t for t in topics)
+
+    def test_ha_status_online_republishes_discovery(self, mqtt_client):
+        """HA birth message should republish discovery and online status."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._handle_ha_status("online")
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" in topics
+        assert "test/6160/status" in topics
+
+    def test_ha_status_offline_ignored(self, mqtt_client):
+        """HA offline message should not trigger republish."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._handle_ha_status("offline")
+
+        mqtt_client._client.publish.assert_not_called()
+
+    def test_connect_failure_returns_early(self, mqtt_client):
+        """Failed connection should not publish anything."""
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc(failure=True))
+        mqtt_client._client.publish.assert_not_called()
+
+
 class TestHaDiscovery:
     def test_discovery_messages(self):
         from keypad6160.ha_discovery import build_discovery_messages
