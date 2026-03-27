@@ -112,6 +112,10 @@ class KeypadMqttClient:
 
         self._start_uptime_publishing()
 
+        # Display Home Assistant + version on keypad
+        self._writer.enqueue(build_message(1, "Home Assistant", source="mqtt:connect"))
+        self._writer.enqueue(build_raw_message(2, __version__, source="mqtt:connect"))
+
         # Subscribe to command topics
         topics = [
             (self._ha_status_topic, 1),

@@ -264,6 +264,21 @@ class TestOnConnect:
         mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc(failure=True))
         mqtt_client._client.publish.assert_not_called()
 
+    def test_on_connect_displays_home_assistant_version(self, mqtt_client, writer):
+        """On MQTT connect, display 'Home Assistant' on line 1 and version on line 2."""
+        from keypad6160 import __version__
+
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        if mqtt_client._uptime_timer:
+            mqtt_client._uptime_timer.cancel()
+        # Find enqueue calls that display Home Assistant and the version
+        payloads = [
+            call.args[0].payloads[0]
+            for call in writer.enqueue.call_args_list
+        ]
+        assert any("1=Home Assistant" in p for p in payloads)
+        assert any(f"2={__version__}" in p for p in payloads)
+
 
 class TestHaDiscovery:
     def test_discovery_messages(self):
