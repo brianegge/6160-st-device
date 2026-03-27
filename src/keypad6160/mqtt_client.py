@@ -98,6 +98,10 @@ class KeypadMqttClient:
 
         log.info("Connected to MQTT broker")
 
+        # Re-publish discovery (no-op on first connect; covers reconnects)
+        if self._discovery_messages:
+            self.publish_discovery(self._discovery_messages)
+
         # Publish online status and version
         self._publish(f"{self._prefix}/status", "online", retain=True)
         self._publish(f"{self._prefix}/version/state", __version__, retain=True)
