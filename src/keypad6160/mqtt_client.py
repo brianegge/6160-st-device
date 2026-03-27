@@ -33,6 +33,7 @@ class KeypadMqttClient:
     def __init__(self, config: Config, writer: SerialIO, notices: NoticeManager | None = None) -> None:
         self._config = config
         self._discovery_messages: list[tuple[str, str]] = []
+        self._first_connect = True
         self._ha_status_topic = "homeassistant/status"
         self._writer = writer
         self._notices = notices
@@ -98,8 +99,11 @@ class KeypadMqttClient:
 
         log.info("Connected to MQTT broker")
 
-        # Re-publish discovery (no-op on first connect; covers reconnects)
-        if self._discovery_messages:
+        # Re-publish discovery on reconnect (skip first connect —
+        # __main__.py seeds discovery messages after connect()).
+        if self._first_connect:
+            self._first_connect = False
+        elif self._discovery_messages:
             self.publish_discovery(self._discovery_messages)
 
         # Publish online status and version
