@@ -173,6 +173,14 @@ class TestMqttCallbacks:
         mqtt_client._on_message(mqtt_client._client, None, msg)
         assert notices.active_count == 0
 
+    def test_on_message_dispatches_notice_clear_json(self, mqtt_client, notices):
+        notices.set("Washer Done", notice_id="washer", ttl=0)
+        msg = MagicMock()
+        msg.topic = "test/6160/notice/clear"
+        msg.payload = json.dumps({"id": "washer"}).encode()
+        mqtt_client._on_message(mqtt_client._client, None, msg)
+        assert notices.active_count == 0
+
     def test_notice_set_json_with_ttl(self, mqtt_client, notices):
         msg = MagicMock()
         msg.topic = "test/6160/notice/set"
@@ -192,13 +200,15 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 6
+        assert len(messages) == 8
         topics = [t for t, _ in messages]
         assert "homeassistant/select/keypad_6160_mode/config" in topics
         assert "homeassistant/light/keypad_6160_backlight/config" in topics
         assert "homeassistant/text/keypad_6160_message/config" in topics
         assert "homeassistant/button/keypad_6160_reset/config" in topics
         assert "homeassistant/event/keypad_6160_keypress/config" in topics
+        assert "homeassistant/binary_sensor/keypad_6160_status/config" in topics
+        assert "homeassistant/sensor/keypad_6160_version/config" in topics
         assert "homeassistant/sensor/keypad_6160_uptime/config" in topics
 
         # Verify JSON payloads are valid

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 
+from keypad6160 import __version__
 from keypad6160.f7_protocol import (
     build_backlight_command,
     build_message,
@@ -31,6 +32,8 @@ class KeypadMqttClient:
 
     def __init__(self, config: Config, writer: SerialIO, notices: NoticeManager | None = None) -> None:
         self._config = config
+        self._discovery_messages: list[tuple[str, str]] = []
+        self._ha_status_topic = "homeassistant/status"
         self._writer = writer
         self._notices = notices
         self._prefix = config.mqtt_topic_prefix
@@ -75,6 +78,7 @@ class KeypadMqttClient:
 
     def publish_discovery(self, discovery_messages: list[tuple[str, str]]) -> None:
         """Publish a list of (topic, json_payload) discovery messages."""
+        self._discovery_messages = discovery_messages
         for topic, payload in discovery_messages:
             self._publish(topic, payload, retain=True)
 
@@ -94,13 +98,15 @@ class KeypadMqttClient:
 
         log.info("Connected to MQTT broker")
 
-        # Publish online status
+        # Publish online status and version
         self._publish(f"{self._prefix}/status", "online", retain=True)
+        self._publish(f"{self._prefix}/version/state", __version__, retain=True)
 
         self._start_uptime_publishing()
 
         # Subscribe to command topics
         topics = [
+            (self._ha_status_topic, 1),
             (f"{self._prefix}/mode/set", 1),
             (f"{self._prefix}/message/set", 1),
             (f"{self._prefix}/message/1/set", 1),
@@ -125,7 +131,9 @@ class KeypadMqttClient:
         log.info("MQTT << %s: %s", topic, payload)
 
         try:
-            if topic == f"{self._prefix}/mode/set":
+            if topic == self._ha_status_topic:
+                self._handle_ha_status(payload)
+            elif topic == f"{self._prefix}/mode/set":
                 self._handle_mode(payload)
             elif topic == f"{self._prefix}/message/set":
                 self._handle_json_message(payload)
@@ -149,6 +157,14 @@ class KeypadMqttClient:
             log.exception("Error handling MQTT message on %s", topic)
 
     # -- Handlers ----------------------------------------------------------
+
+    def _handle_ha_status(self, payload: str) -> None:
+        """Re-publish discovery and state when Home Assistant comes online."""
+        if payload == "online":
+            log.info("Home Assistant birth message received, republishing discovery")
+            self.publish_discovery(self._discovery_messages)
+            self._publish(f"{self._prefix}/status", "online", retain=True)
+            self._publish(f"{self._prefix}/version/state", __version__, retain=True)
 
     def _handle_mode(self, mode: str) -> None:
         cmd = build_message(1, mode, source="mqtt:mode")
@@ -203,7 +219,12 @@ class KeypadMqttClient:
     def _handle_notice_clear(self, payload: str) -> None:
         if self._notices is None:
             return
-        self._notices.clear(payload)
+        try:
+            data = json.loads(payload)
+            notice_id = data.get("id", payload)
+        except (json.JSONDecodeError, TypeError):
+            notice_id = payload
+        self._notices.clear(notice_id)
 
     def publish_key_event(self, key: str) -> None:
         """Publish a key press event to MQTT."""
