@@ -271,7 +271,7 @@ class TestHaDiscovery:
 
         config = Config(mqtt_topic_prefix="test/6160")
         messages = build_discovery_messages(config)
-        assert len(messages) == 8
+        assert len(messages) == 9
         topics = [t for t, _ in messages]
         assert "homeassistant/select/keypad_6160_mode/config" in topics
         assert "homeassistant/light/keypad_6160_backlight/config" in topics
@@ -281,6 +281,7 @@ class TestHaDiscovery:
         assert "homeassistant/binary_sensor/keypad_6160_status/config" in topics
         assert "homeassistant/sensor/keypad_6160_version/config" in topics
         assert "homeassistant/sensor/keypad_6160_uptime/config" in topics
+        assert "homeassistant/update/keypad_6160_firmware/config" in topics
 
         # Verify JSON payloads are valid
         for _, payload in messages:

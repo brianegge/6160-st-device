@@ -6,6 +6,8 @@ import json
 import logging
 import threading
 import time
+import urllib.request
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
@@ -54,7 +56,11 @@ class KeypadMqttClient:
             retain=True,
         )
 
+        self._github_repo = "brianegge/6160-st-device"
+        self._latest_version: str | None = None
+        self._start_iso = datetime.now(timezone.utc).isoformat()
         self._start_time = time.monotonic()
+        self._update_timer: threading.Timer | None = None
         self._uptime_timer: threading.Timer | None = None
 
         self._client.on_connect = self._on_connect
@@ -74,6 +80,8 @@ class KeypadMqttClient:
         """Publish offline status and disconnect."""
         if self._uptime_timer:
             self._uptime_timer.cancel()
+        if self._update_timer:
+            self._update_timer.cancel()
         self._publish(f"{self._prefix}/status", "offline", retain=True)
         self._client.disconnect()
 
@@ -111,6 +119,7 @@ class KeypadMqttClient:
         self._publish(f"{self._prefix}/version/state", __version__, retain=True)
 
         self._start_uptime_publishing()
+        self._start_update_checking()
 
         # Subscribe to command topics
         topics = [
@@ -245,11 +254,44 @@ class KeypadMqttClient:
         self._publish_uptime()
 
     def _publish_uptime(self) -> None:
-        uptime = int(time.monotonic() - self._start_time)
-        self._publish(f"{self._prefix}/uptime/state", str(uptime))
+        self._publish(f"{self._prefix}/uptime/state", self._start_iso)
         self._uptime_timer = threading.Timer(60, self._publish_uptime)
         self._uptime_timer.daemon = True
         self._uptime_timer.start()
+
+    # -- Update check ------------------------------------------------------
+
+    def _start_update_checking(self) -> None:
+        self._check_and_publish_update()
+
+    def _check_and_publish_update(self) -> None:
+        try:
+            self._latest_version = self._fetch_latest_version()
+        except Exception:
+            log.debug("Failed to fetch latest release from GitHub", exc_info=True)
+        state = {
+            "installed_version": __version__,
+            "latest_version": self._latest_version or __version__,
+        }
+        if self._latest_version and self._latest_version != __version__:
+            state["release_url"] = (
+                f"https://github.com/{self._github_repo}/releases/tag/{self._latest_version}"
+            )
+        self._publish(f"{self._prefix}/update/state", json.dumps(state), retain=True)
+        # Re-check every 4 hours
+        self._update_timer = threading.Timer(4 * 3600, self._check_and_publish_update)
+        self._update_timer.daemon = True
+        self._update_timer.start()
+
+    def _fetch_latest_version(self) -> str:
+        """Fetch the latest release tag from GitHub."""
+        url = f"https://api.github.com/repos/{self._github_repo}/releases/latest"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "")
+        # Strip leading 'v' if present (e.g. "v1.2.0" -> "1.2.0")
+        return tag.lstrip("v") if tag else __version__
 
     # -- Helpers -----------------------------------------------------------
 
