@@ -30,9 +30,11 @@ def notices():
 
 @pytest.fixture
 def mqtt_client(config, writer, notices):
-    with patch("keypad6160.mqtt_client.mqtt.Client"):
+    with patch("keypad6160.mqtt_client.mqtt.Client"), \
+         patch("keypad6160.mqtt_client.threading.Timer") as mock_timer:
+        mock_timer.return_value = MagicMock()
         client = KeypadMqttClient(config, writer, notices=notices)
-    return client
+        yield client
 
 
 class TestMqttCallbacks:
