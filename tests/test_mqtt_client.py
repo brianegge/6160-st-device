@@ -32,7 +32,7 @@ def notices():
 def mqtt_client(config, writer, notices):
     with patch("keypad6160.mqtt_client.mqtt.Client"), \
          patch("keypad6160.mqtt_client.threading.Timer") as mock_timer:
-        mock_timer.return_value = MagicMock()
+        mock_timer.side_effect = lambda *args, **kwargs: MagicMock()
         client = KeypadMqttClient(config, writer, notices=notices)
         yield client
 
