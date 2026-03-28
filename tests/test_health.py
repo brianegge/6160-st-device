@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import urllib.request
 
+import pytest
+
 from keypad6160.health import start_health_server
 
 
+@pytest.mark.enable_socket
 class TestHealthServer:
     def test_health_returns_200(self):
         server = start_health_server(0)  # port 0 = OS picks a free port
