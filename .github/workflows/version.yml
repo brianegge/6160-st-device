@@ -4,6 +4,9 @@ on:
   push:
     branches: [master]
 
+concurrency:
+  group: auto-version
+
 jobs:
   bump:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
           git fetch --tags
           TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1)
           if [ -z "$TAG" ]; then
-            TAG="v1.0.0"
+            TAG="v0.0.0"
           fi
           echo "current=$TAG" >> "$GITHUB_OUTPUT"
 
