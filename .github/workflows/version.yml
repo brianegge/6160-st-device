@@ -1,0 +1,50 @@
+name: Auto Version
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install ".[dev]"
+      - run: pytest tests/ -v
+
+      - name: Get latest version tag
+        id: tag
+        run: |
+          git fetch --tags
+          TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$TAG" ]; then
+            TAG="v1.0.0"
+          fi
+          echo "current=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          VERSION="${{ steps.tag.outputs.current }}"
+          VERSION="${VERSION#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          PATCH=$((PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.bump.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"

@@ -68,7 +68,7 @@ def build_message(line_no: int | str, text: str, quiet: bool = False, source: st
     are applied.  When a tone > 0 is set, a follow-up command resets the tone
     after a 1.5 s delay so the keypad doesn't beep indefinitely.
     """
-    args = ALARM_STATES.get(text, "b=1 c=1 ")
+    args = ALARM_STATES.get(text, "b=1 c=1 t=0 ")
     payload = f"F7 {args}{line_no}={text:<16}\n"
 
     # Check if a non-zero tone was set (t=1..9)
@@ -98,7 +98,7 @@ def build_raw_message(
 ) -> SerialCommand:
     """Build an F7 command with explicit parameters (no alarm-state lookup)."""
     text = shorten(text)
-    args = f"b={backlight} "
+    args = f"b={backlight} t=0 "
     payload = f"F7 {args}{line_no}={text:16.16}\n"
     return SerialCommand(payloads=[payload], source=source, coalesce_key=f"line:{line_no}")
 

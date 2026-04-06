@@ -30,9 +30,11 @@ def notices():
 
 @pytest.fixture
 def mqtt_client(config, writer, notices):
-    with patch("keypad6160.mqtt_client.mqtt.Client"):
+    with patch("keypad6160.mqtt_client.mqtt.Client"), \
+         patch("keypad6160.mqtt_client.threading.Timer") as mock_timer:
+        mock_timer.return_value = MagicMock()
         client = KeypadMqttClient(config, writer, notices=notices)
-    return client
+        yield client
 
 
 class TestMqttCallbacks:
@@ -192,6 +194,92 @@ class TestMqttCallbacks:
         """JSON payload without 'id' should default to 60s TTL."""
         mqtt_client._handle_notice_set(json.dumps({"message": "Quick Note"}))
         assert notices.active_count == 1
+
+
+class TestOnConnect:
+    def _make_rc(self, failure=False):
+        rc = MagicMock()
+        rc.is_failure = failure
+        return rc
+
+    def test_first_connect_does_not_republish_discovery(self, mqtt_client):
+        """First _on_connect should NOT republish discovery (avoids double-publish)."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        # Should publish status + version + uptime, but NOT discovery
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" not in topics
+        assert "test/6160/status" in topics
+
+    def test_reconnect_republishes_discovery(self, mqtt_client):
+        """Subsequent _on_connect (reconnect) should republish stored discovery."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+
+        # First connect — consumes the flag
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        mqtt_client._client.publish.reset_mock()
+
+        # Second connect — should republish discovery
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" in topics
+
+    def test_reconnect_without_discovery_messages_is_noop(self, mqtt_client):
+        """Reconnect with empty discovery list should not error."""
+        # First connect
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        mqtt_client._client.publish.reset_mock()
+
+        # Reconnect with no stored messages
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        # Only status/version/uptime, no discovery
+        assert all("config" not in t for t in topics)
+
+    def test_ha_status_online_republishes_discovery(self, mqtt_client):
+        """HA birth message should republish discovery and online status."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._handle_ha_status("online")
+
+        topics = [c[0][0] for c in mqtt_client._client.publish.call_args_list]
+        assert "ha/sensor/config" in topics
+        assert "test/6160/status" in topics
+
+    def test_ha_status_offline_ignored(self, mqtt_client):
+        """HA offline message should not trigger republish."""
+        mqtt_client._discovery_messages = [("ha/sensor/config", '{"name":"x"}')]
+        mqtt_client._client.publish.reset_mock()
+
+        mqtt_client._handle_ha_status("offline")
+
+        mqtt_client._client.publish.assert_not_called()
+
+    def test_connect_failure_returns_early(self, mqtt_client):
+        """Failed connection should not publish anything."""
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc(failure=True))
+        mqtt_client._client.publish.assert_not_called()
+
+    def test_on_connect_displays_home_assistant_version(self, mqtt_client, writer):
+        """On MQTT connect, display 'Home Assistant' on line 1 and version on line 2."""
+        from keypad6160 import __version__
+
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), self._make_rc())
+        if mqtt_client._uptime_timer:
+            mqtt_client._uptime_timer.cancel()
+        # Find enqueue calls that display Home Assistant and the version
+        payloads = [
+            call.args[0].payloads[0]
+            for call in writer.enqueue.call_args_list
+        ]
+        assert any("1=Home Assistant" in p for p in payloads)
+        assert any(f"2={__version__}" in p for p in payloads)
 
 
 class TestHaDiscovery:
