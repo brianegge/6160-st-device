@@ -93,7 +93,10 @@ class SerialIO(threading.Thread):
         self._notice_manager: NoticeManager | None = None
         self._last_line2 = ""
         self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
-        self._last_auto_reset_monotonic: float = 0.0
+        # Init far enough in the past that the first ERR_ always passes the
+        # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
+        # hosts (e.g. CI runners), making 0.0 unsafe.
+        self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -245,7 +248,7 @@ class SerialIO(threading.Thread):
                 self._on_initialized()
         elif line.startswith("KEYS_"):
             self._handle_keys(line)
-        elif "ERR_" in line:
+        elif line.startswith("ERR_"):
             self._handle_error_line(line)
 
     def _handle_error_line(self, line: str) -> None:
