@@ -12,7 +12,7 @@ import logging
 import queue
 import re
 import threading
-from time import sleep
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Callable
 
 import serial
@@ -60,6 +60,14 @@ class _CoalescingQueue:
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
 
+# Pacing delay after each serial write, in seconds.  Must exceed the time the
+# Arduino needs to relay a full F7 frame on the 4800-baud keybus (~100 ms) plus
+# margin, so back-to-back writes don't overrun its 256-byte USB rx buffer.
+_POST_WRITE_DELAY_S = 0.35
+
+# Minimum interval between auto-resets triggered by Arduino error lines.
+_AUTO_RESET_COOLDOWN_S = 60.0
+
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
     0x0A: "*", 0x0B: "#",
@@ -85,6 +93,7 @@ class SerialIO(threading.Thread):
         self._notice_manager: NoticeManager | None = None
         self._last_line2 = ""
         self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
+        self._last_auto_reset_monotonic: float = 0.0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -211,7 +220,7 @@ class SerialIO(threading.Thread):
         exceed the time the Arduino takes to relay on the 4800-baud
         keypad bus (~100 ms for a full frame).
         """
-        sleep(0.2)
+        sleep(_POST_WRITE_DELAY_S)
         while self._port.in_waiting:
             raw = self._port.readline()
             if raw:
@@ -236,6 +245,21 @@ class SerialIO(threading.Thread):
                 self._on_initialized()
         elif line.startswith("KEYS_"):
             self._handle_keys(line)
+        elif "ERR_" in line:
+            self._handle_error_line(line)
+
+    def _handle_error_line(self, line: str) -> None:
+        """Arduino reported a parser error; reset it to recover from a
+        potentially wedged state (e.g. USB rx buffer overrun corrupting the
+        keybus-relay loop).  Rate-limited to avoid reset loops.
+        """
+        now = monotonic()
+        if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
+            log.warning("Arduino error %r (auto-reset in cooldown)", line)
+            return
+        log.warning("Arduino error %r — auto-resetting via DTR", line)
+        self._last_auto_reset_monotonic = now
+        self._reset_device()
 
     def _handle_keys(self, line: str) -> None:
         """Parse KEYS message and invoke callback for each key press."""
