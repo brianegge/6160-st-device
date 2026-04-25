@@ -41,6 +41,7 @@ class _CoalescingQueue:
         self._not_empty = threading.Condition(self._lock)
 
     def put(self, item: SerialCommand | None) -> None:
+        """Append *item*, dropping any pending item with the same coalesce_key."""
         with self._not_empty:
             if item is not None and item.coalesce_key:
                 self._items = [
@@ -51,6 +52,7 @@ class _CoalescingQueue:
             self._not_empty.notify()
 
     def get(self, timeout: float | None = None) -> SerialCommand | None:
+        """Pop the oldest item, blocking up to *timeout* seconds."""
         with self._not_empty:
             while not self._items:
                 if not self._not_empty.wait(timeout):
@@ -113,6 +115,7 @@ class SerialIO(threading.Thread):
         self._queue.put(None)
 
     def run(self) -> None:
+        """Thread entry point — runs the I/O loop with auto-reconnect on error."""
         while True:
             try:
                 self._run_loop()
@@ -147,6 +150,7 @@ class SerialIO(threading.Thread):
                 log.warning("Reconnect failed, retrying in 5s")
 
     def _run_loop(self) -> None:
+        """Drain the command queue; between commands, read async data and tick the clock."""
         while True:
             try:
                 cmd = self._queue.get(timeout=self._port.timeout)
@@ -169,6 +173,7 @@ class SerialIO(threading.Thread):
     # -- Writing -----------------------------------------------------------
 
     def _execute(self, cmd: SerialCommand) -> None:
+        """Send each payload of *cmd* with pacing and per-payload response drain."""
         if cmd.reset:
             self._reset_device()
             return
@@ -248,6 +253,7 @@ class SerialIO(threading.Thread):
                 self._handle_line(line)
 
     def _handle_line(self, line: str) -> None:
+        """Dispatch an incoming line from the Arduino to the appropriate handler."""
         if "initialized" in line:
             self._consecutive_errors = 0
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
@@ -276,6 +282,10 @@ class SerialIO(threading.Thread):
         now = monotonic()
         if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
             log.warning("Arduino error %r (auto-reset in cooldown)", line)
+            # Require a fresh streak of errors after cooldown elapses, rather
+            # than letting a single straggling error trigger a reset the moment
+            # the cooldown window ends.
+            self._consecutive_errors = 0
             return
         log.warning("Arduino error %r — auto-resetting via DTR", line)
         self._last_auto_reset_monotonic = now
@@ -296,6 +306,7 @@ class SerialIO(threading.Thread):
                     self.on_keypress(key)
 
     def _update_line2(self) -> None:
+        """Push the current notice text to keypad line 2 if it has changed."""
         if self._notice_manager is None:
             return
         text = self._notice_manager.get_current_display()
