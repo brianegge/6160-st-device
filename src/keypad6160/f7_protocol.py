@@ -106,7 +106,7 @@ def build_raw_message(
 def build_backlight_command(on: bool, source: str = "") -> SerialCommand:
     """Build an F7 command that only toggles the LCD backlight."""
     payload = f"F7 b={1 if on else 0}\n"
-    return SerialCommand(payloads=[payload], source=source)
+    return SerialCommand(payloads=[payload], source=source, coalesce_key="backlight")
 
 
 def build_tone_command(tone: int, source: str = "") -> SerialCommand:

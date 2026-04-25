@@ -68,6 +68,11 @@ _POST_WRITE_DELAY_S = 0.35
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
 
+# Consecutive ERR_ lines required before triggering a DTR reset.  Isolated
+# garbles self-recover on the Arduino without intervention; resetting on the
+# first error makes the keypad audibly beep during the ~2 s reboot window.
+_AUTO_RESET_ERROR_THRESHOLD = 3
+
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
     0x0A: "*", 0x0B: "#",
@@ -97,6 +102,7 @@ class SerialIO(threading.Thread):
         # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
         # hosts (e.g. CI runners), making 0.0 unsafe.
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
+        self._consecutive_errors: int = 0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -243,25 +249,37 @@ class SerialIO(threading.Thread):
 
     def _handle_line(self, line: str) -> None:
         if "initialized" in line:
+            self._consecutive_errors = 0
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
         elif line.startswith("KEYS_"):
+            self._consecutive_errors = 0
             self._handle_keys(line)
         elif line.startswith("ERR_"):
             self._handle_error_line(line)
+        else:
+            self._consecutive_errors = 0
 
     def _handle_error_line(self, line: str) -> None:
-        """Arduino reported a parser error; reset it to recover from a
-        potentially wedged state (e.g. USB rx buffer overrun corrupting the
-        keybus-relay loop).  Rate-limited to avoid reset loops.
+        """Arduino reported a parser error; reset only after several consecutive
+        errors, since isolated garbles self-recover on the Arduino without
+        intervention and a DTR reset audibly beeps the keypad.
         """
+        self._consecutive_errors += 1
+        if self._consecutive_errors < _AUTO_RESET_ERROR_THRESHOLD:
+            log.warning(
+                "Arduino error %r (%d/%d before reset)",
+                line, self._consecutive_errors, _AUTO_RESET_ERROR_THRESHOLD,
+            )
+            return
         now = monotonic()
         if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
             log.warning("Arduino error %r (auto-reset in cooldown)", line)
             return
         log.warning("Arduino error %r — auto-resetting via DTR", line)
         self._last_auto_reset_monotonic = now
+        self._consecutive_errors = 0
         self._reset_device()
 
     def _handle_keys(self, line: str) -> None:
