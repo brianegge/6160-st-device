@@ -41,6 +41,7 @@ class _CoalescingQueue:
         self._not_empty = threading.Condition(self._lock)
 
     def put(self, item: SerialCommand | None) -> None:
+        """Append *item*, dropping any pending item with the same coalesce_key."""
         with self._not_empty:
             if item is not None and item.coalesce_key:
                 self._items = [
@@ -51,6 +52,7 @@ class _CoalescingQueue:
             self._not_empty.notify()
 
     def get(self, timeout: float | None = None) -> SerialCommand | None:
+        """Pop the oldest item, blocking up to *timeout* seconds."""
         with self._not_empty:
             while not self._items:
                 if not self._not_empty.wait(timeout):
@@ -67,6 +69,11 @@ _POST_WRITE_DELAY_S = 0.35
 
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
+
+# Consecutive ERR_ lines required before triggering a DTR reset.  Isolated
+# garbles self-recover on the Arduino without intervention; resetting on the
+# first error makes the keypad audibly beep during the ~2 s reboot window.
+_AUTO_RESET_ERROR_THRESHOLD = 3
 
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
@@ -97,6 +104,7 @@ class SerialIO(threading.Thread):
         # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
         # hosts (e.g. CI runners), making 0.0 unsafe.
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
+        self._consecutive_errors: int = 0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -107,6 +115,7 @@ class SerialIO(threading.Thread):
         self._queue.put(None)
 
     def run(self) -> None:
+        """Thread entry point — runs the I/O loop with auto-reconnect on error."""
         while True:
             try:
                 self._run_loop()
@@ -141,6 +150,7 @@ class SerialIO(threading.Thread):
                 log.warning("Reconnect failed, retrying in 5s")
 
     def _run_loop(self) -> None:
+        """Drain the command queue; between commands, read async data and tick the clock."""
         while True:
             try:
                 cmd = self._queue.get(timeout=self._port.timeout)
@@ -163,6 +173,7 @@ class SerialIO(threading.Thread):
     # -- Writing -----------------------------------------------------------
 
     def _execute(self, cmd: SerialCommand) -> None:
+        """Send each payload of *cmd* with pacing and per-payload response drain."""
         if cmd.reset:
             self._reset_device()
             return
@@ -242,26 +253,43 @@ class SerialIO(threading.Thread):
                 self._handle_line(line)
 
     def _handle_line(self, line: str) -> None:
+        """Dispatch an incoming line from the Arduino to the appropriate handler."""
         if "initialized" in line:
+            self._consecutive_errors = 0
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
         elif line.startswith("KEYS_"):
+            self._consecutive_errors = 0
             self._handle_keys(line)
         elif line.startswith("ERR_"):
             self._handle_error_line(line)
+        else:
+            self._consecutive_errors = 0
 
     def _handle_error_line(self, line: str) -> None:
-        """Arduino reported a parser error; reset it to recover from a
-        potentially wedged state (e.g. USB rx buffer overrun corrupting the
-        keybus-relay loop).  Rate-limited to avoid reset loops.
+        """Arduino reported a parser error; reset only after several consecutive
+        errors, since isolated garbles self-recover on the Arduino without
+        intervention and a DTR reset audibly beeps the keypad.
         """
+        self._consecutive_errors += 1
+        if self._consecutive_errors < _AUTO_RESET_ERROR_THRESHOLD:
+            log.warning(
+                "Arduino error %r (%d/%d before reset)",
+                line, self._consecutive_errors, _AUTO_RESET_ERROR_THRESHOLD,
+            )
+            return
         now = monotonic()
         if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
             log.warning("Arduino error %r (auto-reset in cooldown)", line)
+            # Require a fresh streak of errors after cooldown elapses, rather
+            # than letting a single straggling error trigger a reset the moment
+            # the cooldown window ends.
+            self._consecutive_errors = 0
             return
         log.warning("Arduino error %r — auto-resetting via DTR", line)
         self._last_auto_reset_monotonic = now
+        self._consecutive_errors = 0
         self._reset_device()
 
     def _handle_keys(self, line: str) -> None:
@@ -278,6 +306,7 @@ class SerialIO(threading.Thread):
                     self.on_keypress(key)
 
     def _update_line2(self) -> None:
+        """Push the current notice text to keypad line 2 if it has changed."""
         if self._notice_manager is None:
             return
         text = self._notice_manager.get_current_display()

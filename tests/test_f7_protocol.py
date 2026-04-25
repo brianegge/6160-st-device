@@ -105,10 +105,12 @@ class TestBuildBacklightCommand:
     def test_on(self):
         cmd = build_backlight_command(True)
         assert cmd.payloads == ["F7 b=1\n"]
+        assert cmd.coalesce_key == "backlight"
 
     def test_off(self):
         cmd = build_backlight_command(False)
         assert cmd.payloads == ["F7 b=0\n"]
+        assert cmd.coalesce_key == "backlight"
 
 
 class TestBuildToneCommand:
