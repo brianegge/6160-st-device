@@ -55,9 +55,12 @@ class _CoalescingQueue:
         Reset/priority items are inserted at the front (after any urgent
         items already there) so they are not stuck behind a held throttled
         command; everything else appends in FIFO order.  Once a shutdown
-        sentinel (None) is pending, nothing jumps ahead of it — otherwise
-        an error storm's stream of urgent items could keep the loop from
-        ever reaching the sentinel.
+        sentinel (None) is pending, put() no longer inserts new urgent
+        items ahead of it, so newly enqueued priority/reset traffic (e.g.
+        an error storm) cannot starve shutdown.  (requeue_front() may
+        still re-insert an already-popped held item ahead of the sentinel
+        to preserve draining order — that is one bounded item, not a
+        stream.)
         """
         with self._not_empty:
             if item is not None and item.coalesce_key:
