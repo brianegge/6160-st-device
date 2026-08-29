@@ -70,10 +70,11 @@ _POST_WRITE_DELAY_S = 0.35
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
 
-# Consecutive ERR_ lines required before triggering a DTR reset.  Isolated
-# garbles self-recover on the Arduino without intervention; resetting on the
-# first error makes the keypad audibly beep during the ~2 s reboot window.
-_AUTO_RESET_ERROR_THRESHOLD = 3
+# Two ERR_ lines within this window trigger a DTR reset.  An unbounded
+# consecutive-error count is wrong in both directions: a wedge after one
+# error persists for hours until a third stray garble arrives, while a
+# stray garble hours later triggers an audible reset that wasn't needed.
+_ERR_STRIKE_WINDOW_S = 120.0
 
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
@@ -104,7 +105,7 @@ class SerialIO(threading.Thread):
         # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
         # hosts (e.g. CI runners), making 0.0 unsafe.
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
-        self._consecutive_errors: int = 0
+        self._last_err_monotonic: float = -_ERR_STRIKE_WINDOW_S
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -255,42 +256,55 @@ class SerialIO(threading.Thread):
     def _handle_line(self, line: str) -> None:
         """Dispatch an incoming line from the Arduino to the appropriate handler."""
         if "initialized" in line:
-            self._consecutive_errors = 0
+            self._last_err_monotonic = -_ERR_STRIKE_WINDOW_S
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
         elif line.startswith("KEYS_"):
-            self._consecutive_errors = 0
             self._handle_keys(line)
         elif line.startswith("ERR_"):
             self._handle_error_line(line)
-        else:
-            self._consecutive_errors = 0
 
     def _handle_error_line(self, line: str) -> None:
-        """Arduino reported a parser error; reset only after several consecutive
-        errors, since isolated garbles self-recover on the Arduino without
-        intervention and a DTR reset audibly beeps the keypad.
+        """Arduino reported a parser error.
+
+        Every error gets a quiet display refresh: the garbled frame may have
+        latched a tone (t=4 is a continuous fast beep) or left stale text, and
+        resending the current display with t=0 clears both within a second.
+
+        An isolated error otherwise self-recovers on the Arduino, and a DTR
+        reset audibly beeps the keypad, so only a second error within
+        _ERR_STRIKE_WINDOW_S — a sign the Arduino is wedged rather than
+        recovering — triggers a reset (rate-limited by the cooldown).
         """
-        self._consecutive_errors += 1
-        if self._consecutive_errors < _AUTO_RESET_ERROR_THRESHOLD:
+        now = monotonic()
+        prior_err = self._last_err_monotonic
+        self._last_err_monotonic = now
+        self._refresh_display()
+        if now - prior_err >= _ERR_STRIKE_WINDOW_S:
             log.warning(
-                "Arduino error %r (%d/%d before reset)",
-                line, self._consecutive_errors, _AUTO_RESET_ERROR_THRESHOLD,
+                "Arduino error %r — refreshing display (reset on 2nd error "
+                "within %.0fs)", line, _ERR_STRIKE_WINDOW_S,
             )
             return
-        now = monotonic()
         if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
             log.warning("Arduino error %r (auto-reset in cooldown)", line)
-            # Require a fresh streak of errors after cooldown elapses, rather
-            # than letting a single straggling error trigger a reset the moment
-            # the cooldown window ends.
-            self._consecutive_errors = 0
             return
         log.warning("Arduino error %r — auto-resetting via DTR", line)
         self._last_auto_reset_monotonic = now
-        self._consecutive_errors = 0
+        # Don't pair a post-reset garble with a pre-reset one.
+        self._last_err_monotonic = -_ERR_STRIKE_WINDOW_S
         self._reset_device()
+
+    def _refresh_display(self) -> None:
+        """Enqueue a quiet t=0 frame; _ensure_both_lines attaches the current
+        display text, restoring whatever the garbled frame corrupted."""
+        self.enqueue(SerialCommand(
+            payloads=["F7 t=0\n"],
+            quiet=True,
+            source="err-refresh",
+            coalesce_key="refresh",
+        ))
 
     def _handle_keys(self, line: str) -> None:
         """Parse KEYS message and invoke callback for each key press."""
