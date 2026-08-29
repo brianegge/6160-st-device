@@ -30,6 +30,9 @@ class SerialCommand:
     delays: list[float] = field(default_factory=list)
     quiet: bool = False
     reset: bool = False
+    # Urgent commands (resets, error recovery) jump ahead of held display
+    # traffic and are exempt from the inter-write throttle.
+    priority: bool = False
     source: str = ""
     coalesce_key: str = ""
 

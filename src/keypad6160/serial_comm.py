@@ -40,15 +40,32 @@ class _CoalescingQueue:
         self._lock = threading.Lock()
         self._not_empty = threading.Condition(self._lock)
 
+    def _urgent_end(self) -> int:
+        """Index just past the leading run of reset/priority items."""
+        idx = 0
+        for it in self._items:
+            if it is None or not (it.reset or it.priority):
+                break
+            idx += 1
+        return idx
+
     def put(self, item: SerialCommand | None) -> None:
-        """Append *item*, dropping any pending item with the same coalesce_key."""
+        """Add *item*, dropping any pending item with the same coalesce_key.
+
+        Reset/priority items are inserted at the front (after any urgent
+        items already there) so they are not stuck behind a held throttled
+        command; everything else appends in FIFO order.
+        """
         with self._not_empty:
             if item is not None and item.coalesce_key:
                 self._items = [
                     i for i in self._items
                     if i is None or i.coalesce_key != item.coalesce_key
                 ]
-            self._items.append(item)
+            if item is not None and (item.reset or item.priority):
+                self._items.insert(self._urgent_end(), item)
+            else:
+                self._items.append(item)
             self._not_empty.notify()
 
     def get(self, timeout: float | None = None) -> SerialCommand | None:
@@ -60,7 +77,8 @@ class _CoalescingQueue:
             return self._items.pop(0)
 
     def requeue_front(self, item: SerialCommand) -> None:
-        """Put a popped-but-not-yet-sent item back at the head of the queue.
+        """Put a popped-but-not-yet-sent item back at the head of the queue,
+        behind any urgent (reset/priority) items that arrived meanwhile.
 
         If a newer item with the same coalesce_key arrived in the meantime,
         the held item is stale and is dropped instead of re-inserted.
@@ -71,8 +89,15 @@ class _CoalescingQueue:
                 for i in self._items
             ):
                 return
-            self._items.insert(0, item)
+            self._items.insert(self._urgent_end(), item)
             self._not_empty.notify()
+
+    def has_key(self, key: str) -> bool:
+        """True if any pending item carries *key* as its coalesce_key."""
+        with self._not_empty:
+            return any(
+                i is not None and i.coalesce_key == key for i in self._items
+            )
 
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
@@ -80,18 +105,32 @@ _LINE_RE = re.compile(r" ([12])=(.{16})")
 # Pacing delay after each serial write, in seconds.  Must exceed the time the
 # Arduino needs to relay a full F7 frame on the 4800-baud keybus (~100 ms) plus
 # margin, so back-to-back writes don't overrun its 256-byte USB rx buffer.
+# This blocking response-drain delay runs INSIDE the (much larger)
+# _MIN_WRITE_INTERVAL_S window; it is not additional spacing between frames.
 _POST_WRITE_DELAY_S = 0.35
 
-# Minimum gap between serial commands, in seconds.  Bursts of display updates
+# Minimum gap between serial frames, in seconds.  Bursts of display updates
 # (13+ frames/min, some sub-second apart) flood the keybus and put the keypad
 # into a fast beep until traffic subsides.  While a command waits out this
 # interval it stays in the coalescing queue, so a burst collapses to the
-# latest text instead of being sent frame by frame.
+# latest text instead of being sent frame by frame.  Enforced between
+# commands and between the payloads of one command; must stay well above
+# _POST_WRITE_DELAY_S, which nests inside it.  Priority/reset commands are
+# exempt.
 _MIN_WRITE_INTERVAL_S = 2.0
 
 # Poll step while waiting out _MIN_WRITE_INTERVAL_S, so unsolicited data
 # (e.g. keypresses) is still read promptly during the wait.
 _THROTTLE_POLL_S = 0.1
+
+# Hold writes this long after a DTR reset — the Arduino's bootloader owns
+# the port for ~1.6-2 s after reset and silently discards frames.
+_POST_RESET_HOLD_S = 2.0
+
+# Line-2 clock/notice updates tick at most this often.  Callers may poll
+# _update_line2 far more frequently (the throttle wait polls at 10 Hz);
+# without this floor each poll would advance the notice rotation.
+_LINE2_TICK_INTERVAL_S = 1.0
 
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
@@ -133,6 +172,7 @@ class SerialIO(threading.Thread):
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
         self._last_err_monotonic: float = -_ERR_STRIKE_WINDOW_S
         self._next_write_ok_monotonic: float = 0.0
+        self._next_line2_tick_monotonic: float = 0.0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -184,23 +224,23 @@ class SerialIO(threading.Thread):
                 cmd = self._queue.get(timeout=self._port.timeout)
             except queue.Empty:
                 # No queued command — read unsolicited data and update clock
-                self._read_unsolicited()
-                self._update_line2()
+                self._idle_tick()
                 continue
 
             if cmd is None:
                 log.info("SerialIO received shutdown sentinel")
                 return
-            if not cmd.reset and monotonic() < self._next_write_ok_monotonic:
+            wait = self._next_write_ok_monotonic - monotonic()
+            if not (cmd.reset or cmd.priority) and wait > 0:
                 # Too soon after the last write — hold the command in the
-                # queue (where a newer same-key update may replace it) and
-                # keep servicing incoming data while the interval elapses.
-                # The clock still ticks here: during a sustained burst the
-                # queue never drains, so notice updates would otherwise stall.
+                # queue (where a newer same-key update may replace it, and
+                # urgent commands jump ahead of it) and keep servicing
+                # incoming data while the interval elapses.  The clock still
+                # ticks here: during a sustained burst the queue never
+                # drains, so notice updates would otherwise stall.
                 self._queue.requeue_front(cmd)
-                self._read_unsolicited()
-                self._update_line2()
-                sleep(_THROTTLE_POLL_S)
+                self._idle_tick()
+                sleep(min(_THROTTLE_POLL_S, wait))
                 continue
             try:
                 self._execute(cmd)
@@ -217,6 +257,13 @@ class SerialIO(threading.Thread):
             self._reset_device()
             return
         for i, payload in enumerate(cmd.payloads):
+            if i > 0 and not cmd.priority:
+                # The minimum frame gap applies inside a multi-payload
+                # command too (tone + reset would otherwise go out 1.85 s
+                # apart, under the floor).
+                remaining = self._next_write_ok_monotonic - monotonic()
+                if remaining > 0:
+                    sleep(remaining)
             payload = self._ensure_both_lines(payload)
             if not cmd.quiet:
                 log.info(">> [%s] %s", cmd.source, payload.strip())
@@ -229,6 +276,13 @@ class SerialIO(threading.Thread):
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
             self._read_response(cmd.source)
+
+    def _idle_tick(self) -> None:
+        """What SerialIO does when it is not writing: service incoming
+        data and keep the line-2 clock/notices current.  Shared by the
+        empty-queue and throttle-wait paths so both stay in sync."""
+        self._read_unsolicited()
+        self._update_line2()
 
     def _ensure_both_lines(self, payload: str) -> str:
         """Rewrite an F7 payload to always include both 1= and 2= fields.
@@ -258,11 +312,16 @@ class SerialIO(threading.Thread):
         return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
 
     def _reset_device(self) -> None:
-        """Reset the Arduino by toggling the DTR line."""
+        """Reset the Arduino by toggling the DTR line.
+
+        Also holds subsequent writes for _POST_RESET_HOLD_S: the bootloader
+        owns the port for ~2 s after reset and silently discards frames.
+        """
         log.info("Resetting Arduino via DTR toggle")
         self._port.dtr = False
         sleep(0.1)
         self._port.dtr = True
+        self._next_write_ok_monotonic = monotonic() + _POST_RESET_HOLD_S
 
     # -- Reading -----------------------------------------------------------
 
@@ -337,10 +396,15 @@ class SerialIO(threading.Thread):
 
     def _refresh_display(self) -> None:
         """Enqueue a quiet t=0 frame; _ensure_both_lines attaches the current
-        display text, restoring whatever the garbled frame corrupted."""
+        display text, restoring whatever the garbled frame corrupted.
+
+        Marked priority: a garbled frame may have latched t=4 (continuous
+        fast beep), so the clear must not wait out the write throttle.
+        """
         self.enqueue(SerialCommand(
             payloads=["F7 t=0\n"],
             quiet=True,
+            priority=True,
             source="err-refresh",
             coalesce_key="refresh",
         ))
@@ -359,9 +423,22 @@ class SerialIO(threading.Thread):
                     self.on_keypress(key)
 
     def _update_line2(self) -> None:
-        """Push the current notice text to keypad line 2 if it has changed."""
+        """Push the current notice text to keypad line 2 if it has changed.
+
+        Rate-limited to _LINE2_TICK_INTERVAL_S because get_current_display()
+        advances the notice rotation on every call, and callers (the 10 Hz
+        throttle wait in particular) may poll much faster.  Skipped entirely
+        while an explicit line-2 command is pending, so a background clock
+        tick can never coalesce away a user message before it is written.
+        """
         if self._notice_manager is None:
             return
+        now = monotonic()
+        if now < self._next_line2_tick_monotonic:
+            return
+        if self._queue.has_key("line:2"):
+            return
+        self._next_line2_tick_monotonic = now + _LINE2_TICK_INTERVAL_S
         text = self._notice_manager.get_current_display()
         if text != self._last_line2:
             self._last_line2 = text
