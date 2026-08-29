@@ -7,12 +7,21 @@ import threading
 import time
 from unittest.mock import MagicMock, PropertyMock, call, patch
 
+import pytest
+
 from keypad6160.config import Config
 from keypad6160.f7_protocol import SerialCommand
 from keypad6160.serial_comm import SerialIO, _CoalescingQueue
 
 
 class TestSerialIO:
+    @pytest.fixture(autouse=True)
+    def _no_write_throttle(self, monkeypatch):
+        """Disable the inter-write throttle by default so threaded tests
+        don't slow down; throttle tests override it locally."""
+        monkeypatch.setattr("keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.0)
+        monkeypatch.setattr("keypad6160.serial_comm._THROTTLE_POLL_S", 0.01)
+
     def _make_io(self, port, **kwargs):
         port.timeout = kwargs.pop("timeout", 0.1)
         # Default: no bytes waiting (tests override via PropertyMock as needed)
@@ -220,23 +229,14 @@ class TestSerialIO:
     def test_errs_outside_window_do_not_reset(self):
         """Two ERR_ lines further apart than the strike window are treated
         as independent isolated garbles and must not reset."""
-        port = MagicMock()
-        port.readline.side_effect = [
-            b"ERR_FMT: first\n",
-            b"ERR_FMT: second\n",
-        ]
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0):
-            io = self._make_io(port)
-            type(port).in_waiting = PropertyMock(side_effect=[20, 0, 20, 0])
-            with patch(
-                "keypad6160.serial_comm.monotonic",
-                side_effect=[100.0, 300.0],
-            ), patch.object(io, "_reset_device") as mock_reset:
-                io.enqueue(SerialCommand(payloads=["a\n"], source="test"))
-                io.enqueue(SerialCommand(payloads=["b\n"], source="test"))
-                io.shutdown()
-                io.join(timeout=5)
-                mock_reset.assert_not_called()
+        io = SerialIO(MagicMock())
+        with patch(
+            "keypad6160.serial_comm.monotonic",
+            side_effect=[100.0, 300.0],
+        ), patch.object(io, "_reset_device") as mock_reset:
+            io._handle_line("ERR_FMT: first")
+            io._handle_line("ERR_FMT: second")
+            mock_reset.assert_not_called()
 
     def test_err_line_enqueues_display_refresh(self):
         """Every ERR_ line should enqueue a quiet t=0 refresh so a latched
@@ -255,70 +255,95 @@ class TestSerialIO:
     def test_err_line_auto_reset_has_cooldown(self):
         """A second ERR_ pair arriving within the 60 s cooldown after a reset
         should not trigger another reset."""
-        port = MagicMock()
-        port.readline.side_effect = [
-            b"ERR_FMT: 1\n",
-            b"ERR_FMT: 2\n",  # pairs with 1 -> reset #1
-            b"ERR_FMT: 3\n",  # isolated (window cleared by reset)
-            b"ERR_FMT: 4\n",  # pairs with 3, but cooldown blocks
-        ]
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0):
-            io = self._make_io(port)
-            type(port).in_waiting = PropertyMock(side_effect=[20, 0] * 4)
-            with patch(
-                "keypad6160.serial_comm.monotonic",
-                side_effect=[100.0, 110.0, 120.0, 130.0],
-            ), patch.object(io, "_reset_device") as mock_reset:
-                for _ in range(4):
-                    io.enqueue(SerialCommand(payloads=["x\n"], source="test"))
-                io.shutdown()
-                io.join(timeout=5)
-                assert mock_reset.call_count == 1
+        io = SerialIO(MagicMock())
+        with patch(
+            "keypad6160.serial_comm.monotonic",
+            side_effect=[100.0, 110.0, 120.0, 130.0],
+        ), patch.object(io, "_reset_device") as mock_reset:
+            io._handle_line("ERR_FMT: 1")
+            io._handle_line("ERR_FMT: 2")  # pairs with 1 -> reset #1
+            io._handle_line("ERR_FMT: 3")  # isolated (window cleared by reset)
+            io._handle_line("ERR_FMT: 4")  # pairs with 3, but cooldown blocks
+            assert mock_reset.call_count == 1
 
     def test_reset_clears_strike_window(self):
         """A garble after a reset must not pair with one from before the
         reset — a fresh pair is required."""
-        port = MagicMock()
-        port.readline.side_effect = [
-            b"ERR_FMT: 1\n",
-            b"ERR_FMT: 2\n",  # pairs with 1 -> reset #1
-            b"ERR_FMT: 3\n",  # past cooldown, but isolated -> no reset
-        ]
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0):
-            io = self._make_io(port)
-            type(port).in_waiting = PropertyMock(side_effect=[20, 0] * 3)
-            with patch(
-                "keypad6160.serial_comm.monotonic",
-                side_effect=[100.0, 110.0, 200.0],
-            ), patch.object(io, "_reset_device") as mock_reset:
-                for _ in range(3):
-                    io.enqueue(SerialCommand(payloads=["x\n"], source="test"))
-                io.shutdown()
-                io.join(timeout=5)
-                assert mock_reset.call_count == 1
+        io = SerialIO(MagicMock())
+        with patch(
+            "keypad6160.serial_comm.monotonic",
+            side_effect=[100.0, 110.0, 200.0],
+        ), patch.object(io, "_reset_device") as mock_reset:
+            io._handle_line("ERR_FMT: 1")
+            io._handle_line("ERR_FMT: 2")  # pairs with 1 -> reset #1
+            io._handle_line("ERR_FMT: 3")  # past cooldown, but isolated
+            assert mock_reset.call_count == 1
 
     def test_err_line_auto_reset_after_cooldown(self):
         """A fresh ERR_ pair after the cooldown elapses triggers a second
         reset."""
+        io = SerialIO(MagicMock())
+        with patch(
+            "keypad6160.serial_comm.monotonic",
+            side_effect=[100.0, 110.0, 200.0, 210.0],
+        ), patch.object(io, "_reset_device") as mock_reset:
+            io._handle_line("ERR_FMT: 1")
+            io._handle_line("ERR_FMT: 2")  # pairs with 1 -> reset #1
+            io._handle_line("ERR_FMT: 3")
+            io._handle_line("ERR_FMT: 4")  # pairs with 3, past cooldown
+            assert mock_reset.call_count == 2
+
+    def test_throttle_spaces_out_writes(self):
+        """Two back-to-back commands must be separated by at least the
+        minimum write interval."""
+        times: list[float] = []
         port = MagicMock()
-        port.readline.side_effect = [
-            b"ERR_FMT: 1\n",
-            b"ERR_FMT: 2\n",  # pairs with 1 -> reset #1
-            b"ERR_FMT: 3\n",
-            b"ERR_FMT: 4\n",  # pairs with 3, past cooldown -> reset #2
-        ]
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0):
+        port.write.side_effect = lambda _b: times.append(time.monotonic())
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.3
+        ):
             io = self._make_io(port)
-            type(port).in_waiting = PropertyMock(side_effect=[20, 0] * 4)
-            with patch(
-                "keypad6160.serial_comm.monotonic",
-                side_effect=[100.0, 110.0, 200.0, 210.0],
-            ), patch.object(io, "_reset_device") as mock_reset:
-                for _ in range(4):
-                    io.enqueue(SerialCommand(payloads=["x\n"], source="test"))
-                io.shutdown()
-                io.join(timeout=5)
-                assert mock_reset.call_count == 2
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            io.enqueue(SerialCommand(payloads=["F7 2=Two\n"], coalesce_key="line:2"))
+            io.shutdown()
+            io.join(timeout=5)
+        assert len(times) == 2
+        assert times[1] - times[0] >= 0.29
+
+    def test_throttled_burst_coalesces_to_latest(self):
+        """Same-key updates arriving during the throttle wait must collapse
+        to the newest one instead of being sent frame by frame."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.5
+        ):
+            io = self._make_io(port)
+            io.enqueue(SerialCommand(payloads=["F7 2=First\n"], coalesce_key="line:2"))
+            time.sleep(0.2)  # First is written; throttle window now active
+            io.enqueue(SerialCommand(payloads=["F7 2=Second\n"], coalesce_key="line:2"))
+            io.enqueue(SerialCommand(payloads=["F7 2=Third\n"], coalesce_key="line:2"))
+            time.sleep(0.6)  # window elapses; latest survivor is written
+            io.shutdown()
+            io.join(timeout=5)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        assert len(writes) == 2
+        assert "First" in writes[0]
+        assert "Third" in writes[1]
+
+    def test_reset_command_bypasses_throttle(self):
+        """A DTR reset must not wait out the write interval."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 5.0
+        ):
+            io = self._make_io(port)
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            io.enqueue(SerialCommand(reset=True))
+            io.shutdown()
+            io.join(timeout=2)
+        assert not io.is_alive()
+        assert port.write.call_count == 1
+        assert port.dtr is True
 
     def test_err_in_middle_of_line_ignored(self):
         """Only lines that *start* with ERR_ should trigger an auto-reset."""
