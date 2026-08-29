@@ -481,6 +481,19 @@ class TestSerialIO:
         nm.get_current_display.assert_not_called()
         assert io._queue._items == [held]
 
+    def test_put_unless_pending_yields_to_explicit_command(self):
+        """The atomic check-and-put must never coalesce away a pending
+        explicit command, and must add normally when none is pending."""
+        q = _CoalescingQueue()
+        held = SerialCommand(payloads=["F7 2=User Msg\n"], coalesce_key="line:2")
+        notice = SerialCommand(payloads=["F7 2=Clock\n"], coalesce_key="line:2")
+        q.put(held)
+        assert q.put_unless_pending(notice, "line:2") is False
+        assert q._items == [held]
+        q.get()
+        assert q.put_unless_pending(notice, "line:2") is True
+        assert q._items == [notice]
+
     def test_update_line2_rate_limited(self):
         """get_current_display() advances the notice rotation per call, so
         rapid polling (the 10 Hz throttle wait) must not reach it more than

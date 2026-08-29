@@ -93,11 +93,36 @@ class _CoalescingQueue:
             self._not_empty.notify()
 
     def has_key(self, key: str) -> bool:
-        """True if any pending item carries *key* as its coalesce_key."""
+        """True if any pending item carries *key* as its coalesce_key.
+
+        Advisory only — the lock is released on return, so use
+        put_unless_pending() for a check that must be atomic with the
+        enqueue.
+        """
         with self._not_empty:
             return any(
                 i is not None and i.coalesce_key == key for i in self._items
             )
+
+    def put_unless_pending(self, item: SerialCommand, key: str) -> bool:
+        """Atomically add *item* unless an item with coalesce_key *key* is
+        already pending; returns True if it was added.
+
+        Unlike put(), this never coalesces an existing item away — it is
+        for background updates (the line-2 clock) that must yield to an
+        explicit pending command rather than replace it.
+        """
+        with self._not_empty:
+            if any(
+                i is not None and i.coalesce_key == key for i in self._items
+            ):
+                return False
+            if item.reset or item.priority:
+                self._items.insert(self._urgent_end(), item)
+            else:
+                self._items.append(item)
+            self._not_empty.notify()
+            return True
 
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
@@ -455,13 +480,20 @@ class SerialIO(threading.Thread):
         now = monotonic()
         if now < self._next_line2_tick_monotonic:
             return
+        # Advisory pre-check so a pending explicit command doesn't cost a
+        # rotation advance; the enqueue below re-checks atomically.
         if self._queue.has_key("line:2"):
             return
         self._next_line2_tick_monotonic = now + _LINE2_TICK_INTERVAL_S
         text = self._notice_manager.get_current_display()
         if text != self._last_line2:
-            self._last_line2 = text
-            self.enqueue(build_message(2, text, quiet=True, source="notice"))
+            cmd = build_message(2, text, quiet=True, source="notice")
+            # Atomic check-and-put: an explicit line-2 command enqueued
+            # between the pre-check and here must win, not be coalesced
+            # away.  On a lost race, leave _last_line2 unchanged so this
+            # text is retried on a later tick.
+            if self._queue.put_unless_pending(cmd, "line:2"):
+                self._last_line2 = text
 
 
 def open_serial(config: Config) -> serial.Serial:
