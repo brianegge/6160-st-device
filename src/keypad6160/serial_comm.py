@@ -124,7 +124,10 @@ _MIN_WRITE_INTERVAL_S = 2.0
 _THROTTLE_POLL_S = 0.1
 
 # Hold writes this long after a DTR reset — the Arduino's bootloader owns
-# the port for ~1.6-2 s after reset and silently discards frames.
+# the port for ~1.6-2 s after reset and silently discards frames.  Unlike
+# the flood throttle, this hold applies to priority commands too: nothing
+# useful can be written to a rebooting device.  Only reset commands are
+# exempt (a second DTR toggle during boot just restarts the boot).
 _POST_RESET_HOLD_S = 2.0
 
 # Line-2 clock/notice updates tick at most this often.  Callers may poll
@@ -172,6 +175,7 @@ class SerialIO(threading.Thread):
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
         self._last_err_monotonic: float = -_ERR_STRIKE_WINDOW_S
         self._next_write_ok_monotonic: float = 0.0
+        self._post_reset_hold_monotonic: float = 0.0
         self._next_line2_tick_monotonic: float = 0.0
 
     def enqueue(self, cmd: SerialCommand) -> None:
@@ -230,18 +234,25 @@ class SerialIO(threading.Thread):
             if cmd is None:
                 log.info("SerialIO received shutdown sentinel")
                 return
-            wait = self._next_write_ok_monotonic - monotonic()
-            if not (cmd.reset or cmd.priority) and wait > 0:
-                # Too soon after the last write — hold the command in the
-                # queue (where a newer same-key update may replace it, and
-                # urgent commands jump ahead of it) and keep servicing
-                # incoming data while the interval elapses.  The clock still
-                # ticks here: during a sustained burst the queue never
-                # drains, so notice updates would otherwise stall.
-                self._queue.requeue_front(cmd)
-                self._idle_tick()
-                sleep(min(_THROTTLE_POLL_S, wait))
-                continue
+            if not cmd.reset:
+                now = monotonic()
+                # The post-reset hold gates everything (the device is
+                # rebooting); the flood throttle additionally gates
+                # non-priority display traffic.
+                wait = self._post_reset_hold_monotonic - now
+                if not cmd.priority:
+                    wait = max(wait, self._next_write_ok_monotonic - now)
+                if wait > 0:
+                    # Too soon to write — hold the command in the queue
+                    # (where a newer same-key update may replace it, and
+                    # urgent commands jump ahead of it) and keep servicing
+                    # incoming data while the interval elapses.  The clock
+                    # still ticks here: during a sustained burst the queue
+                    # never drains, so notice updates would otherwise stall.
+                    self._queue.requeue_front(cmd)
+                    self._idle_tick()
+                    sleep(min(_THROTTLE_POLL_S, wait))
+                    continue
             try:
                 self._execute(cmd)
             except (serial.SerialException, OSError):
@@ -257,11 +268,18 @@ class SerialIO(threading.Thread):
             self._reset_device()
             return
         for i, payload in enumerate(cmd.payloads):
-            if i > 0 and not cmd.priority:
+            if i > 0:
                 # The minimum frame gap applies inside a multi-payload
                 # command too (tone + reset would otherwise go out 1.85 s
-                # apart, under the floor).
-                remaining = self._next_write_ok_monotonic - monotonic()
+                # apart, under the floor), and the post-reset hold applies
+                # even to priority commands — an auto-reset can fire from
+                # the previous payload's response drain.
+                now = monotonic()
+                remaining = self._post_reset_hold_monotonic - now
+                if not cmd.priority:
+                    remaining = max(
+                        remaining, self._next_write_ok_monotonic - now
+                    )
                 if remaining > 0:
                     sleep(remaining)
             payload = self._ensure_both_lines(payload)
@@ -314,14 +332,15 @@ class SerialIO(threading.Thread):
     def _reset_device(self) -> None:
         """Reset the Arduino by toggling the DTR line.
 
-        Also holds subsequent writes for _POST_RESET_HOLD_S: the bootloader
-        owns the port for ~2 s after reset and silently discards frames.
+        Also holds ALL subsequent writes (priority included) for
+        _POST_RESET_HOLD_S: the bootloader owns the port for ~2 s after
+        reset and silently discards frames.
         """
         log.info("Resetting Arduino via DTR toggle")
         self._port.dtr = False
         sleep(0.1)
         self._port.dtr = True
-        self._next_write_ok_monotonic = monotonic() + _POST_RESET_HOLD_S
+        self._post_reset_hold_monotonic = monotonic() + _POST_RESET_HOLD_S
 
     # -- Reading -----------------------------------------------------------
 

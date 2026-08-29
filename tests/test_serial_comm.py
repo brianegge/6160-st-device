@@ -428,6 +428,27 @@ class TestSerialIO:
         # 0.1 s DTR toggle + 0.4 s hold, minus scheduling slop.
         assert elapsed >= 0.45
 
+    def test_priority_respects_post_reset_hold(self):
+        """Priority exempts a command from the flood throttle, NOT from the
+        post-reset hold — nothing useful can be written to a rebooting
+        Arduino, so even the err-refresh must wait out the bootloader."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._POST_RESET_HOLD_S", 0.4
+        ):
+            io = self._make_io(port)
+            start = time.monotonic()
+            io.enqueue(SerialCommand(reset=True))
+            io.enqueue(SerialCommand(
+                payloads=["F7 t=0\n"], priority=True, coalesce_key="refresh"
+            ))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            elapsed = time.monotonic() - start
+            io.shutdown()
+            io.join(timeout=5)
+        # 0.1 s DTR toggle + 0.4 s hold, minus scheduling slop.
+        assert elapsed >= 0.45
+
     def test_multi_payload_respects_min_interval(self):
         """The minimum frame gap also applies between the payloads of one
         command (tone + tone-reset)."""
