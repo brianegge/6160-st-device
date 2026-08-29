@@ -21,6 +21,8 @@ class TestSerialIO:
         don't slow down; throttle tests override it locally."""
         monkeypatch.setattr("keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.0)
         monkeypatch.setattr("keypad6160.serial_comm._THROTTLE_POLL_S", 0.01)
+        monkeypatch.setattr("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.0)
+        monkeypatch.setattr("keypad6160.serial_comm._LINE2_TICK_INTERVAL_S", 0.0)
 
     def _make_io(self, port, **kwargs):
         port.timeout = kwargs.pop("timeout", 0.1)
@@ -250,6 +252,7 @@ class TestSerialIO:
         cmd = items[0]
         assert cmd.payloads == ["F7 t=0\n"]
         assert cmd.quiet is True
+        assert cmd.priority is True
         assert cmd.coalesce_key == "refresh"
 
     def test_err_line_auto_reset_has_cooldown(self):
@@ -363,6 +366,157 @@ class TestSerialIO:
             io.join(timeout=5)
         writes = [c[0][0].decode() for c in port.write.call_args_list]
         assert any("Sat Aug 29 09:00" in w for w in writes)
+
+    def test_err_refresh_bypasses_throttle(self):
+        """A garble during an active throttle window must be cleared
+        immediately — the priority err-refresh cannot wait out the window,
+        or a latched t=4 fast beep persists for seconds.  Runs with the
+        throttle active and ERR handling through the real read path."""
+        port = MagicMock()
+        port.readline.return_value = b"ERR_FMT: garble\n"
+        reads = iter([20])
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 5.0
+        ):
+            io = self._make_io(port)
+            type(port).in_waiting = PropertyMock(
+                side_effect=lambda *a: next(reads, 0)
+            )
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            # The write garbles (ERR read in its response drain); the
+            # refresh must be written well before the 5 s window expires.
+            assert self._wait_until(lambda: port.write.call_count == 2, timeout=2)
+            io.shutdown()
+            io.join(timeout=5)
+        assert "t=0" in port.write.call_args_list[1][0][0].decode()
+
+    def test_reset_jumps_ahead_of_held_command(self):
+        """A reset enqueued while a display command is being throttled must
+        execute before that held command, not wait behind it."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 5.0
+        ):
+            io = self._make_io(port)
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            io.enqueue(SerialCommand(payloads=["F7 2=Two\n"], coalesce_key="line:2"))
+            with patch.object(io, "_reset_device") as mock_reset:
+                io.enqueue(SerialCommand(reset=True))
+                assert self._wait_until(lambda: mock_reset.called, timeout=2)
+                # The held display command must not have been written first.
+                assert port.write.call_count == 1
+            io._next_write_ok_monotonic = 0.0  # release the hold for a clean join
+            io.shutdown()
+            io.join(timeout=5)
+
+    def test_reset_arms_post_reset_write_hold(self):
+        """After a DTR reset the next write must wait out the bootloader
+        window instead of being sent into it and lost."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._POST_RESET_HOLD_S", 0.4
+        ):
+            io = self._make_io(port)
+            start = time.monotonic()
+            io.enqueue(SerialCommand(reset=True))
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            elapsed = time.monotonic() - start
+            io.shutdown()
+            io.join(timeout=5)
+        # 0.1 s DTR toggle + 0.4 s hold, minus scheduling slop.
+        assert elapsed >= 0.45
+
+    def test_priority_respects_post_reset_hold(self):
+        """Priority exempts a command from the flood throttle, NOT from the
+        post-reset hold — nothing useful can be written to a rebooting
+        Arduino, so even the err-refresh must wait out the bootloader."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._POST_RESET_HOLD_S", 0.4
+        ):
+            io = self._make_io(port)
+            start = time.monotonic()
+            io.enqueue(SerialCommand(reset=True))
+            io.enqueue(SerialCommand(
+                payloads=["F7 t=0\n"], priority=True, coalesce_key="refresh"
+            ))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            elapsed = time.monotonic() - start
+            io.shutdown()
+            io.join(timeout=5)
+        # 0.1 s DTR toggle + 0.4 s hold, minus scheduling slop.
+        assert elapsed >= 0.45
+
+    def test_multi_payload_respects_min_interval(self):
+        """The minimum frame gap also applies between the payloads of one
+        command (tone + tone-reset)."""
+        times: list[float] = []
+        port = MagicMock()
+        port.write.side_effect = lambda _b: times.append(time.monotonic())
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.3
+        ):
+            io = self._make_io(port)
+            io.enqueue(SerialCommand(
+                payloads=["F7 t=2\n", "F7 t=0\n"],
+                delays=[0.05],
+                coalesce_key="tone",
+            ))
+            io.shutdown()
+            io.join(timeout=5)
+        assert len(times) == 2
+        assert times[1] - times[0] >= 0.29
+
+    def test_update_line2_skips_when_line2_pending(self):
+        """A background clock tick must never coalesce away a pending
+        explicit line-2 command (e.g. a throttled user MQTT message)."""
+        io = SerialIO(MagicMock())  # not started
+        nm = MagicMock()
+        io._notice_manager = nm
+        held = SerialCommand(payloads=["F7 2=User Msg\n"], coalesce_key="line:2")
+        io._queue.put(held)
+        io._update_line2()
+        nm.get_current_display.assert_not_called()
+        assert io._queue._items == [held]
+
+    def test_put_unless_pending_yields_to_explicit_command(self):
+        """The atomic check-and-put must never coalesce away a pending
+        explicit command, and must add normally when none is pending."""
+        q = _CoalescingQueue()
+        held = SerialCommand(payloads=["F7 2=User Msg\n"], coalesce_key="line:2")
+        notice = SerialCommand(payloads=["F7 2=Clock\n"], coalesce_key="line:2")
+        q.put(held)
+        assert q.put_unless_pending(notice, "line:2") is False
+        assert q._items == [held]
+        q.get()
+        assert q.put_unless_pending(notice, "line:2") is True
+        assert q._items == [notice]
+
+    def test_urgent_put_does_not_jump_shutdown_sentinel(self):
+        """Once the shutdown sentinel is queued, urgent items must not be
+        inserted ahead of it — an error storm could otherwise keep the loop
+        from ever reaching the sentinel."""
+        q = _CoalescingQueue()
+        q.put(None)
+        q.put(SerialCommand(reset=True))
+        q.put(SerialCommand(payloads=["F7 t=0\n"], priority=True, coalesce_key="refresh"))
+        assert q._items[0] is None
+
+    def test_update_line2_rate_limited(self):
+        """get_current_display() advances the notice rotation per call, so
+        rapid polling (the 10 Hz throttle wait) must not reach it more than
+        once per tick interval."""
+        io = SerialIO(MagicMock())  # not started
+        nm = MagicMock()
+        nm.get_current_display.return_value = "Sat Aug 29 09:00"
+        io._notice_manager = nm
+        with patch("keypad6160.serial_comm._LINE2_TICK_INTERVAL_S", 60.0):
+            io._update_line2()
+            io._update_line2()
+            io._update_line2()
+        assert nm.get_current_display.call_count == 1
 
     def test_reset_command_bypasses_throttle(self):
         """A DTR reset must not wait out the write interval."""

@@ -73,4 +73,4 @@ Broker is at `mqtt.home:1883`. All topics are under the prefix configured by `KE
 - All config is via `KEYPAD_*` environment variables with sensible defaults
 - A single `SerialIO` thread owns the serial port for both reading and writing; commands are submitted via a thread-safe queue
 - F7 commands with a non-zero tone automatically send a follow-up reset after 1.5s
-- The clock on LCD line 2 updates on every serial read timeout (~1s)
+- The clock/notices on LCD line 2 tick at most once per second (idle reads and throttle waits both drive it), and never while an explicit line-2 command is pending
