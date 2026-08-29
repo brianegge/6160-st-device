@@ -195,8 +195,11 @@ class SerialIO(threading.Thread):
                 # Too soon after the last write — hold the command in the
                 # queue (where a newer same-key update may replace it) and
                 # keep servicing incoming data while the interval elapses.
+                # The clock still ticks here: during a sustained burst the
+                # queue never drains, so notice updates would otherwise stall.
                 self._queue.requeue_front(cmd)
                 self._read_unsolicited()
+                self._update_line2()
                 sleep(_THROTTLE_POLL_S)
                 continue
             try:

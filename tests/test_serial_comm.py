@@ -310,6 +310,16 @@ class TestSerialIO:
         assert len(times) == 2
         assert times[1] - times[0] >= 0.29
 
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0) -> bool:
+        """Poll *predicate* until it returns True or *timeout* elapses."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
+
     def test_throttled_burst_coalesces_to_latest(self):
         """Same-key updates arriving during the throttle wait must collapse
         to the newest one instead of being sent frame by frame."""
@@ -319,16 +329,40 @@ class TestSerialIO:
         ):
             io = self._make_io(port)
             io.enqueue(SerialCommand(payloads=["F7 2=First\n"], coalesce_key="line:2"))
-            time.sleep(0.2)  # First is written; throttle window now active
+            # First is written; the throttle window is now active.
+            assert self._wait_until(lambda: port.write.call_count == 1)
             io.enqueue(SerialCommand(payloads=["F7 2=Second\n"], coalesce_key="line:2"))
             io.enqueue(SerialCommand(payloads=["F7 2=Third\n"], coalesce_key="line:2"))
-            time.sleep(0.6)  # window elapses; latest survivor is written
+            # Window elapses; the latest survivor is written.
+            assert self._wait_until(lambda: port.write.call_count == 2)
             io.shutdown()
             io.join(timeout=5)
         writes = [c[0][0].decode() for c in port.write.call_args_list]
         assert len(writes) == 2
         assert "First" in writes[0]
         assert "Third" in writes[1]
+
+    def test_notice_updates_tick_during_throttle(self):
+        """Clock/notice updates must not stall while commands are being
+        throttled — during a sustained burst the queue never drains, so the
+        idle-branch _update_line2 call alone would never run."""
+        port = MagicMock()
+        nm = MagicMock()
+        nm.get_current_display.return_value = "Sat Aug 29 09:00"
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._MIN_WRITE_INTERVAL_S", 0.3
+        ):
+            io = self._make_io(port)
+            io._notice_manager = nm
+            io.enqueue(SerialCommand(payloads=["F7 1=One\n"], coalesce_key="line:1"))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            io.enqueue(SerialCommand(payloads=["F7 1=Two\n"], coalesce_key="line:1"))
+            # Both the held command and the notice update get written.
+            assert self._wait_until(lambda: port.write.call_count == 3)
+            io.shutdown()
+            io.join(timeout=5)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        assert any("Sat Aug 29 09:00" in w for w in writes)
 
     def test_reset_command_bypasses_throttle(self):
         """A DTR reset must not wait out the write interval."""
