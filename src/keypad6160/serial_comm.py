@@ -59,6 +59,21 @@ class _CoalescingQueue:
                     raise queue.Empty
             return self._items.pop(0)
 
+    def requeue_front(self, item: SerialCommand) -> None:
+        """Put a popped-but-not-yet-sent item back at the head of the queue.
+
+        If a newer item with the same coalesce_key arrived in the meantime,
+        the held item is stale and is dropped instead of re-inserted.
+        """
+        with self._not_empty:
+            if item.coalesce_key and any(
+                i is not None and i.coalesce_key == item.coalesce_key
+                for i in self._items
+            ):
+                return
+            self._items.insert(0, item)
+            self._not_empty.notify()
+
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
 
@@ -66,6 +81,17 @@ _LINE_RE = re.compile(r" ([12])=(.{16})")
 # Arduino needs to relay a full F7 frame on the 4800-baud keybus (~100 ms) plus
 # margin, so back-to-back writes don't overrun its 256-byte USB rx buffer.
 _POST_WRITE_DELAY_S = 0.35
+
+# Minimum gap between serial commands, in seconds.  Bursts of display updates
+# (13+ frames/min, some sub-second apart) flood the keybus and put the keypad
+# into a fast beep until traffic subsides.  While a command waits out this
+# interval it stays in the coalescing queue, so a burst collapses to the
+# latest text instead of being sent frame by frame.
+_MIN_WRITE_INTERVAL_S = 2.0
+
+# Poll step while waiting out _MIN_WRITE_INTERVAL_S, so unsolicited data
+# (e.g. keypresses) is still read promptly during the wait.
+_THROTTLE_POLL_S = 0.1
 
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
@@ -106,6 +132,7 @@ class SerialIO(threading.Thread):
         # hosts (e.g. CI runners), making 0.0 unsafe.
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
         self._last_err_monotonic: float = -_ERR_STRIKE_WINDOW_S
+        self._next_write_ok_monotonic: float = 0.0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -164,6 +191,14 @@ class SerialIO(threading.Thread):
             if cmd is None:
                 log.info("SerialIO received shutdown sentinel")
                 return
+            if not cmd.reset and monotonic() < self._next_write_ok_monotonic:
+                # Too soon after the last write — hold the command in the
+                # queue (where a newer same-key update may replace it) and
+                # keep servicing incoming data while the interval elapses.
+                self._queue.requeue_front(cmd)
+                self._read_unsolicited()
+                sleep(_THROTTLE_POLL_S)
+                continue
             try:
                 self._execute(cmd)
             except (serial.SerialException, OSError):
@@ -186,6 +221,7 @@ class SerialIO(threading.Thread):
                 log.debug(">> [%s] %s", cmd.source, payload.strip())
             self._port.write(payload.encode("ascii"))
             self._port.flush()
+            self._next_write_ok_monotonic = monotonic() + _MIN_WRITE_INTERVAL_S
             # Delay between payloads (e.g. tone-reset needs 1.5 s)
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
