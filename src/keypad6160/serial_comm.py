@@ -54,7 +54,10 @@ class _CoalescingQueue:
 
         Reset/priority items are inserted at the front (after any urgent
         items already there) so they are not stuck behind a held throttled
-        command; everything else appends in FIFO order.
+        command; everything else appends in FIFO order.  Once a shutdown
+        sentinel (None) is pending, nothing jumps ahead of it — otherwise
+        an error storm's stream of urgent items could keep the loop from
+        ever reaching the sentinel.
         """
         with self._not_empty:
             if item is not None and item.coalesce_key:
@@ -62,7 +65,11 @@ class _CoalescingQueue:
                     i for i in self._items
                     if i is None or i.coalesce_key != item.coalesce_key
                 ]
-            if item is not None and (item.reset or item.priority):
+            if (
+                item is not None
+                and (item.reset or item.priority)
+                and not any(i is None for i in self._items)
+            ):
                 self._items.insert(self._urgent_end(), item)
             else:
                 self._items.append(item)
@@ -117,7 +124,9 @@ class _CoalescingQueue:
                 i is not None and i.coalesce_key == key for i in self._items
             ):
                 return False
-            if item.reset or item.priority:
+            if (item.reset or item.priority) and not any(
+                i is None for i in self._items
+            ):
                 self._items.insert(self._urgent_end(), item)
             else:
                 self._items.append(item)
@@ -490,8 +499,10 @@ class SerialIO(threading.Thread):
             cmd = build_message(2, text, quiet=True, source="notice")
             # Atomic check-and-put: an explicit line-2 command enqueued
             # between the pre-check and here must win, not be coalesced
-            # away.  On a lost race, leave _last_line2 unchanged so this
-            # text is retried on a later tick.
+            # away.  On a lost race, leave _last_line2 unchanged — the
+            # rotation has moved on, so this exact text may never come
+            # around again, but a stale _last_line2 guarantees a later
+            # tick sees a difference and updates the display.
             if self._queue.put_unless_pending(cmd, "line:2"):
                 self._last_line2 = text
 

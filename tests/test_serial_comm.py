@@ -494,6 +494,16 @@ class TestSerialIO:
         assert q.put_unless_pending(notice, "line:2") is True
         assert q._items == [notice]
 
+    def test_urgent_put_does_not_jump_shutdown_sentinel(self):
+        """Once the shutdown sentinel is queued, urgent items must not be
+        inserted ahead of it — an error storm could otherwise keep the loop
+        from ever reaching the sentinel."""
+        q = _CoalescingQueue()
+        q.put(None)
+        q.put(SerialCommand(reset=True))
+        q.put(SerialCommand(payloads=["F7 t=0\n"], priority=True, coalesce_key="refresh"))
+        assert q._items[0] is None
+
     def test_update_line2_rate_limited(self):
         """get_current_display() advances the notice rotation per call, so
         rapid polling (the 10 Hz throttle wait) must not reach it more than
