@@ -139,6 +139,9 @@ class _CoalescingQueue:
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
 
+# Matches the backlight flag in an F7 argument string.
+_BACKLIGHT_RE = re.compile(r"\bb=([01])")
+
 # Pacing delay after each serial write, in seconds.  Must exceed the time the
 # Arduino needs to relay a full F7 frame on the 4800-baud keybus (~100 ms) plus
 # margin, so back-to-back writes don't overrun its 256-byte USB rx buffer.
@@ -159,6 +162,22 @@ _MIN_WRITE_INTERVAL_S = 2.0
 # Poll step while waiting out _MIN_WRITE_INTERVAL_S, so unsolicited data
 # (e.g. keypresses) is still read promptly during the wait.
 _THROTTLE_POLL_S = 0.1
+
+# Send a quiet keepalive frame when the port has been idle this long.
+#
+# The Arduino re-sends its current F7 on the keybus by itself 4 s after the
+# last one it relayed (KP_F7_PERIOD in USB2keybus.ino).  Its SoftwareSerial
+# bit-bangs each keybus byte with interrupts disabled, and the Mega's UART
+# only buffers two bytes, so any frame we write during that ~100 ms
+# transmit loses bytes in ~20-byte chunks — the 'F7outside' /
+# 'F7t=0 1=Re Car o' garbles in the log.  _POST_WRITE_DELAY_S covers the
+# relay of our own frame, but the periodic re-send fires on the Arduino's
+# clock and we can't see it coming.  Writing something ourselves before
+# the 4 s elapse restarts that timer, so the periodic re-send never fires
+# and every keybus F7 transmit is one we scheduled.  Must stay below 4 s
+# by enough to absorb our own scheduling jitter, and above
+# _MIN_WRITE_INTERVAL_S so a held display update is always sent instead.
+_KEEPALIVE_INTERVAL_S = 3.5
 
 # Hold writes this long after a DTR reset — the Arduino's bootloader owns
 # the port for ~1.6-2 s after reset and silently discards frames.  Unlike
@@ -206,6 +225,13 @@ class SerialIO(threading.Thread):
         self._notice_manager: NoticeManager | None = None
         self._last_line2 = ""
         self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
+        # Last backlight flag sent; re-attached to frames that omit b=.
+        self._backlight = "1"
+        self._last_write_monotonic: float | None = None
+        # True only once the Arduino has announced its boot banner, i.e.
+        # the application is running rather than the bootloader.  Gates
+        # the keepalive; see _keepalive_due_s.
+        self._app_ready = False
         # Init far enough in the past that the first ERR_ always passes the
         # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
         # hosts (e.g. CI runners), making 0.0 unsafe.
@@ -238,6 +264,10 @@ class SerialIO(threading.Thread):
 
     def _reconnect(self) -> None:
         """Close the port and reopen it after a delay."""
+        # Reopening asserts DTR and resets the board back into its
+        # bootloader, so liveness has to be re-proven before keepalives
+        # resume.
+        self._app_ready = False
         try:
             self._port.close()
         except Exception:
@@ -262,10 +292,11 @@ class SerialIO(threading.Thread):
         """Drain the command queue; between commands, read async data and tick the clock."""
         while True:
             try:
-                cmd = self._queue.get(timeout=self._port.timeout)
+                cmd = self._queue.get(timeout=self._queue_wait_s())
             except queue.Empty:
                 # No queued command — read unsolicited data and update clock
                 self._idle_tick()
+                self._maybe_keepalive()
                 continue
 
             if cmd is None:
@@ -326,7 +357,9 @@ class SerialIO(threading.Thread):
                 log.debug(">> [%s] %s", cmd.source, payload.strip())
             self._port.write(payload.encode("ascii"))
             self._port.flush()
-            self._next_write_ok_monotonic = monotonic() + _MIN_WRITE_INTERVAL_S
+            now = monotonic()
+            self._next_write_ok_monotonic = now + _MIN_WRITE_INTERVAL_S
+            self._last_write_monotonic = now
             # Delay between payloads (e.g. tone-reset needs 1.5 s)
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
@@ -339,12 +372,73 @@ class SerialIO(threading.Thread):
         self._read_unsolicited()
         self._update_line2()
 
+    def _keepalive_due_s(self) -> float | None:
+        """Seconds until the next keepalive is due, or None if not armed.
+
+        Armed only once the Arduino has sent its boot banner, and only
+        after we have written at least one frame.  The banner gate is the
+        important one, and it is why this is not simply a timer:
+
+        Opening the port asserts DTR, which auto-resets the Mega into its
+        STK500 bootloader, and the bootloader only hands off to the
+        application once the port falls quiet.  A keepalive is by
+        definition traffic that never falls quiet, so an ungated one pins
+        the board in the bootloader forever — no banner, no F7 on the
+        keybus, and the 6160 shows its comm-loss display while this
+        process happily writes well-formed frames into the void.  That is
+        exactly what shipping this ungated did (see the revert of #42).
+
+        So the keepalive is strictly opt-in on proven liveness: no
+        banner, no keepalive, and the service degrades to the original
+        event-driven write pattern that is known to let the bootloader
+        time out.  Deferred past the post-reset hold for the same reason.
+        """
+        if not self._app_ready or self._last_write_monotonic is None:
+            return None
+        due = max(
+            self._last_write_monotonic + _KEEPALIVE_INTERVAL_S,
+            self._post_reset_hold_monotonic,
+        )
+        return due - monotonic()
+
+    def _queue_wait_s(self) -> float:
+        """How long the run loop may block on the queue: the port timeout,
+        shortened so an idle loop wakes in time for the keepalive.  The
+        Arduino's 4 s window leaves only ~0.5 s of slack past the keepalive
+        interval; a full 1 s port timeout would blow through it."""
+        wait = self._port.timeout
+        due = self._keepalive_due_s()
+        if due is not None:
+            wait = min(wait, max(0.0, due))
+        return wait
+
+    def _maybe_keepalive(self) -> None:
+        """Enqueue a quiet keepalive if the port has been idle too long.
+
+        Only reached from the empty-queue path: while a command is held by
+        the throttle it goes out within _MIN_WRITE_INTERVAL_S of the last
+        write and is the keepalive.
+        """
+        due = self._keepalive_due_s()
+        if due is None or due > 0:
+            return
+        self.enqueue(SerialCommand(
+            payloads=["F7 t=0\n"],
+            quiet=True,
+            source="keepalive",
+            coalesce_key="keepalive",
+        ))
+
     def _ensure_both_lines(self, payload: str) -> str:
         """Rewrite an F7 payload to always include both 1= and 2= fields.
 
         The Arduino parser can misinterpret parameters like ``c=1`` as
         line-1 display text when only one line field is present.  By
         always sending both lines we eliminate the ambiguity.
+
+        The backlight flag is likewise sticky here: the Arduino turns the
+        backlight OFF on any frame that omits ``b=``, so a bare tone,
+        err-refresh or keepalive frame would otherwise blank it.
         """
         if not payload.startswith("F7 "):
             return payload
@@ -358,12 +452,22 @@ class SerialIO(threading.Thread):
             # display lines so the Arduino receives a complete F7 frame.
             args = payload[3:].rstrip()
             if args:
-                return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
+                return self._full_frame(args)
             return payload
         for m in matches:
             self._display[int(m.group(1))] = m.group(2)
         # Everything between "F7 " and the first line field is flags/args.
         args = payload[3:matches[0].start()].rstrip()
+        return self._full_frame(args)
+
+    def _full_frame(self, args: str) -> str:
+        """Assemble a complete F7 frame from *args*, the remembered
+        backlight flag and both display lines."""
+        m = _BACKLIGHT_RE.search(args)
+        if m:
+            self._backlight = m.group(1)
+        else:
+            args = f"b={self._backlight} {args}"
         return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
 
     def _reset_device(self) -> None:
@@ -374,6 +478,9 @@ class SerialIO(threading.Thread):
         reset and silently discards frames.
         """
         log.info("Resetting Arduino via DTR toggle")
+        # Back into the bootloader — stop keepalives until the banner says
+        # the application is running again, or they would pin it there.
+        self._app_ready = False
         self._port.dtr = False
         sleep(0.1)
         self._port.dtr = True
@@ -411,6 +518,15 @@ class SerialIO(threading.Thread):
         """Dispatch an incoming line from the Arduino to the appropriate handler."""
         if "initialized" in line:
             self._last_err_monotonic = -_ERR_STRIKE_WINDOW_S
+            if not self._app_ready:
+                # One info line per Arduino boot: the only positive proof
+                # in the log that the application (not the bootloader) is
+                # running and that the keepalive is actually active.
+                log.info(
+                    "Arduino application ready — keepalive armed (every %.1fs)",
+                    _KEEPALIVE_INTERVAL_S,
+                )
+            self._app_ready = True
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
