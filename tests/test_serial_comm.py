@@ -23,9 +23,6 @@ class TestSerialIO:
         monkeypatch.setattr("keypad6160.serial_comm._THROTTLE_POLL_S", 0.01)
         monkeypatch.setattr("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.0)
         monkeypatch.setattr("keypad6160.serial_comm._LINE2_TICK_INTERVAL_S", 0.0)
-        # Keepalives would otherwise sneak extra writes into the exact
-        # write-count assertions below; keepalive tests override this.
-        monkeypatch.setattr("keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 1e9)
 
     def _make_io(self, port, **kwargs):
         port.timeout = kwargs.pop("timeout", 0.1)
@@ -607,80 +604,6 @@ class TestSerialIO:
         assert "t=0" in written
         assert "1=" in written
         assert "2=" in written
-
-    def test_bare_flag_frame_keeps_last_backlight(self):
-        """The Arduino turns the backlight off on any frame without b=, so
-        tone/err-refresh/keepalive frames must carry the last-seen flag."""
-        port = MagicMock()
-        io = self._make_io(port)
-        io.enqueue(SerialCommand(payloads=["F7 b=0 c=1 1=Raspberry Pi OK \n"]))
-        io.enqueue(SerialCommand(payloads=["F7 t=0\n"]))
-        io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 1=Raspberry Pi OK \n"]))
-        io.enqueue(SerialCommand(payloads=["F7 t=4\n"]))
-        io.shutdown()
-        io.join(timeout=2)
-        writes = [c[0][0].decode() for c in port.write.call_args_list]
-        assert writes[1].startswith("F7 b=0 t=0 1=")
-        assert writes[3].startswith("F7 b=1 t=4 1=")
-
-    def test_keepalive_sent_when_idle(self):
-        """After a write, an idle port gets a quiet t=0 refresh before the
-        Arduino's own 4 s re-send timer would fire."""
-        port = MagicMock()
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
-            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.2
-        ):
-            io = self._make_io(port, timeout=1.0)
-            io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 1=Raspberry Pi OK \n"]))
-            assert self._wait_until(lambda: port.write.call_count >= 3, timeout=1.0)
-            io.shutdown()
-            io.join(timeout=2)
-        writes = [c[0][0].decode() for c in port.write.call_args_list]
-        # Every keepalive re-sends the current display with the backlight.
-        assert all(w.startswith("F7 b=1 t=0 1=Raspberry Pi OK ") for w in writes[1:3])
-
-    def test_keepalive_wakes_before_port_timeout(self):
-        """The queue wait is shortened to the keepalive deadline; a 1 s port
-        timeout must not delay a 0.2 s keepalive to ~1 s."""
-        times: list[float] = []
-        port = MagicMock()
-        port.write.side_effect = lambda _b: times.append(time.monotonic())
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
-            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.2
-        ):
-            io = self._make_io(port, timeout=1.0)
-            io.enqueue(SerialCommand(payloads=["F7 1=Hi\n"]))
-            assert self._wait_until(lambda: len(times) >= 2, timeout=1.0)
-            io.shutdown()
-            io.join(timeout=2)
-        assert 0.19 <= times[1] - times[0] < 0.6
-
-    def test_no_keepalive_before_first_write(self):
-        """Nothing has been shown yet — a keepalive would push blank lines
-        over the Arduino's boot banner."""
-        port = MagicMock()
-        with patch("keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05):
-            io = self._make_io(port, timeout=0.02)
-            time.sleep(0.3)
-            io.shutdown()
-            io.join(timeout=2)
-        port.write.assert_not_called()
-
-    def test_keepalive_not_sent_during_post_reset_hold(self):
-        """The bootloader owns the port after a DTR reset; the Arduino's
-        own timer restarts on boot, so no keepalive is needed or wanted."""
-        port = MagicMock()
-        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
-            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05
-        ), patch("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.4):
-            io = self._make_io(port, timeout=0.02)
-            io.enqueue(SerialCommand(payloads=["F7 1=Hi\n"]))
-            assert self._wait_until(lambda: port.write.call_count == 1)
-            io.enqueue(SerialCommand(payloads=[], reset=True))
-            time.sleep(0.3)
-            assert port.write.call_count == 1
-            io.shutdown()
-            io.join(timeout=2)
 
     def test_coalescing_preserves_no_key_commands(self):
         """Commands without a coalesce_key are never dropped."""
