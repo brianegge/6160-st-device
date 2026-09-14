@@ -23,6 +23,9 @@ class TestSerialIO:
         monkeypatch.setattr("keypad6160.serial_comm._THROTTLE_POLL_S", 0.01)
         monkeypatch.setattr("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.0)
         monkeypatch.setattr("keypad6160.serial_comm._LINE2_TICK_INTERVAL_S", 0.0)
+        # Keepalives would otherwise sneak extra writes into the exact
+        # write-count assertions below; keepalive tests override this.
+        monkeypatch.setattr("keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 1e9)
 
     def _make_io(self, port, **kwargs):
         port.timeout = kwargs.pop("timeout", 0.1)
@@ -604,6 +607,135 @@ class TestSerialIO:
         assert "t=0" in written
         assert "1=" in written
         assert "2=" in written
+
+    def test_bare_flag_frame_keeps_last_backlight(self):
+        """The Arduino turns the backlight off on any frame without b=, so
+        tone/err-refresh/keepalive frames must carry the last-seen flag."""
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(SerialCommand(payloads=["F7 b=0 c=1 1=Raspberry Pi OK \n"]))
+        io.enqueue(SerialCommand(payloads=["F7 t=0\n"]))
+        io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 1=Raspberry Pi OK \n"]))
+        io.enqueue(SerialCommand(payloads=["F7 t=4\n"]))
+        io.shutdown()
+        io.join(timeout=2)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        assert writes[1].startswith("F7 b=0 t=0 1=")
+        assert writes[3].startswith("F7 b=1 t=4 1=")
+
+    @staticmethod
+    def _feed(port, lines: list[bytes]) -> None:
+        """Make *port* deliver *lines* once, then stay quiet forever."""
+        pending = list(lines)
+        type(port).in_waiting = PropertyMock(side_effect=lambda: len(pending))
+        port.readline.side_effect = lambda: pending.pop(0) if pending else b""
+
+    BANNER = b"USB2keybus initialized, USB rx buf size 256\n"
+
+    def test_no_keepalive_until_arduino_banner(self):
+        """Regression test for the revert of #42.
+
+        Opening the port resets the Mega into its bootloader, which only
+        hands off to the application once the port falls quiet.  A
+        keepalive sent before the banner pins it there forever: no F7 ever
+        reaches the keybus and the 6160 shows its comm-loss display.  So
+        after the initial frame the port must go *silent* until the
+        Arduino proves the application is running.
+        """
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05
+        ):
+            io = self._make_io(port, timeout=0.02)
+            io.enqueue(SerialCommand(payloads=["F7 b=1 c=1 1=Raspberry Pi OK \n"]))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            # Many keepalive intervals pass with no banner.
+            time.sleep(0.5)
+            assert port.write.call_count == 1
+            io.shutdown()
+            io.join(timeout=2)
+
+    def test_keepalive_starts_after_arduino_banner(self):
+        """Once the banner proves the application is running, the keepalive
+        takes over the F7 cadence."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.1
+        ):
+            io = self._make_io(port, timeout=0.02)
+            self._feed(port, [self.BANNER])
+            assert self._wait_until(lambda: port.write.call_count >= 4)
+            io.shutdown()
+            io.join(timeout=2)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        # First the banner's "Raspberry Pi OK", then keepalives re-sending
+        # it with the backlight flag carried over.
+        assert "1=Raspberry Pi OK" in writes[0]
+        assert all(w.startswith("F7 b=1 t=0 1=Raspberry Pi OK") for w in writes[1:4])
+
+    def test_dtr_reset_disarms_keepalive_until_next_banner(self):
+        """An auto-reset puts the board back in the bootloader, so the
+        keepalive has to stop until the banner returns — otherwise the
+        wedge-recovery reset would itself wedge the board."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05
+        ), patch("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.0):
+            io = self._make_io(port, timeout=0.02)
+            self._feed(port, [self.BANNER])
+            assert self._wait_until(lambda: port.write.call_count >= 3)
+            io.enqueue(SerialCommand(payloads=[], reset=True))
+            assert self._wait_until(lambda: port.dtr is True)
+            settled = port.write.call_count
+            time.sleep(0.4)  # many keepalive intervals, no banner yet
+            assert port.write.call_count == settled
+            io.shutdown()
+            io.join(timeout=2)
+
+    def test_keepalive_wakes_before_port_timeout(self):
+        """The queue wait is shortened to the keepalive deadline; a 1 s port
+        timeout must not delay a 0.2 s keepalive to ~1 s."""
+        times: list[float] = []
+        port = MagicMock()
+        port.write.side_effect = lambda _b: times.append(time.monotonic())
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.2
+        ):
+            io = self._make_io(port, timeout=1.0)
+            self._feed(port, [self.BANNER])
+            assert self._wait_until(lambda: len(times) >= 2, timeout=3.0)
+            io.shutdown()
+            io.join(timeout=2)
+        assert 0.19 <= times[1] - times[0] < 0.6
+
+    def test_no_keepalive_before_first_write(self):
+        """Nothing has been shown yet — a keepalive would push blank lines
+        over the Arduino's boot banner."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05):
+            io = self._make_io(port, timeout=0.02)
+            io._app_ready = True
+            time.sleep(0.3)
+            io.shutdown()
+            io.join(timeout=2)
+        port.write.assert_not_called()
+
+    def test_keepalive_not_sent_during_post_reset_hold(self):
+        """The bootloader owns the port after a DTR reset; the Arduino's
+        own timer restarts on boot, so no keepalive is needed or wanted."""
+        port = MagicMock()
+        with patch("keypad6160.serial_comm._POST_WRITE_DELAY_S", 0), patch(
+            "keypad6160.serial_comm._KEEPALIVE_INTERVAL_S", 0.05
+        ), patch("keypad6160.serial_comm._POST_RESET_HOLD_S", 0.4):
+            io = self._make_io(port, timeout=0.02)
+            io._app_ready = True
+            io.enqueue(SerialCommand(payloads=["F7 1=Hi\n"]))
+            assert self._wait_until(lambda: port.write.call_count == 1)
+            io.enqueue(SerialCommand(payloads=[], reset=True))
+            time.sleep(0.3)
+            assert port.write.call_count == 1
+            io.shutdown()
+            io.join(timeout=2)
 
     def test_coalescing_preserves_no_key_commands(self):
         """Commands without a coalesce_key are never dropped."""
