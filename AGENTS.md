@@ -63,9 +63,14 @@ anything here.
 The Pi keeps no durable local log: journald is `Storage=volatile`, `journalctl --user -u
 keypad6160` returns "No journal files were found", and the service's output does not land in
 the Pi's `/var/log/syslog` either. rsyslog forwards to LibreNMS on `ubuntu24`
-(192.168.254.35:514), which holds the only usable history:
+(192.168.254.35:514), which holds the only usable history.
+
+**Run the query on `ubuntu24`, not on the Pi** — the config file and the `librenms-db`
+container below exist only there, so running it on the Pi just reports a missing file and a
+missing container:
 
 ```bash
+# on ubuntu24
 PW=$(sudo grep -oP 'MYSQL_PASSWORD=\K\S+' /etc/containers/systemd/librenms-db.container)
 sudo podman exec librenms-db mariadb -u librenms -p"$PW" librenms -e \
   "SELECT timestamp, msg FROM syslog WHERE device_id=86 AND program='KEYPAD6160' \
