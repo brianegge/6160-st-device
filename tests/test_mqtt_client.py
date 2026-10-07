@@ -61,12 +61,18 @@ class TestMqttCallbacks:
         assert "1=Hello" in cmd.payloads[0]
 
     def test_handle_json_message_defaults(self, mqtt_client, writer):
+        """An omitted backlight field means "leave it as it is", so that a
+        JSON message cannot silently undo an explicit backlight off."""
         payload = json.dumps({"text": "Hi"})
         mqtt_client._handle_json_message(payload)
         writer.enqueue.assert_called_once()
         cmd = writer.enqueue.call_args[0][0]
-        assert "b=1" in cmd.payloads[0]
+        assert "b=" not in cmd.payloads[0]
         assert "1=Hi" in cmd.payloads[0]
+
+    def test_handle_json_message_explicit_backlight_honoured(self, mqtt_client, writer):
+        mqtt_client._handle_json_message(json.dumps({"text": "Hi", "backlight": "0"}))
+        assert "b=0" in writer.enqueue.call_args[0][0].payloads[0]
 
     def test_handle_line_message(self, mqtt_client, writer):
         mqtt_client._handle_line_message(2, "Clock Text")

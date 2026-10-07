@@ -692,6 +692,46 @@ class TestSerialIO:
             io.shutdown()
             io.join(timeout=2)
 
+    def test_backlight_off_survives_later_display_updates(self):
+        """End-to-end: once the backlight is turned off, ordinary line-1 and
+        line-2 updates must keep it off.
+
+        This is the property the restore depends on.  While build_message
+        hard-coded b=1 for generic text, a single b=0 was undone by the very
+        next clock tick or notice rotation, so "backlight off" survived only
+        until the next message.
+        """
+        from keypad6160.f7_protocol import build_backlight_command, build_message
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(build_backlight_command(False, source="test"))
+        io.enqueue(build_message(2, "Dining Vacant", source="test"))
+        io.enqueue(build_message(1, "Rufus Outside", source="test"))
+        io.shutdown()
+        io.join(timeout=2)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        assert len(writes) == 3
+        assert all("b=0" in w for w in writes), writes
+        assert "b=1" not in "".join(writes)
+
+    def test_alarm_state_still_sets_its_own_backlight(self):
+        """The sticky value must not override a deliberate state backlight."""
+        from keypad6160.f7_protocol import build_backlight_command, build_message
+        port = MagicMock()
+        io = self._make_io(port)
+        io.enqueue(build_backlight_command(False, source="test"))
+        # "Raspberry Pi OK" carries b=1 and, unlike the armed states, no tone
+        # (a tone would add a 1.5 s second payload and slow the test down).
+        io.enqueue(build_message(1, "Raspberry Pi OK", source="test"))
+        io.enqueue(build_message(2, "Dining Vacant", source="test"))
+        io.shutdown()
+        io.join(timeout=3)
+        writes = [c[0][0].decode() for c in port.write.call_args_list]
+        assert len(writes) == 3, writes
+        assert "b=0" in writes[0]
+        assert "b=1" in writes[1]          # the state deliberately lights it
+        assert "b=1" in writes[2]          # and that becomes the new sticky value
+
     def test_keepalive_wakes_before_port_timeout(self):
         """The queue wait is shortened to the keepalive deadline; a 1 s port
         timeout must not delay a 0.2 s keepalive to ~1 s."""

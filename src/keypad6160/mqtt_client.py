@@ -197,7 +197,8 @@ class KeypadMqttClient:
         data = json.loads(raw)
         text = data.get("text", "")
         line_no = data.get("line_no", "1")
-        backlight = data.get("backlight", "1")
+        # Absent means "leave the backlight as it is", not "turn it on".
+        backlight = data.get("backlight")
         cmd = build_raw_message(line_no, text, backlight=backlight, source="mqtt:json")
         self._writer.enqueue(cmd)
 
@@ -240,7 +241,16 @@ class KeypadMqttClient:
         """
         if not retained:
             return
-        self._desired_backlight = payload.upper()
+        if self._desired_backlight is not None:
+            # A live command already told us what is wanted; a retained
+            # replay arriving late is older news and must not undo it.
+            return
+        value = payload.strip().upper()
+        if value not in ("ON", "OFF"):
+            # A zero-length payload is how a retained topic is cleared, so
+            # this means "nothing remembered" -- not "turn it off".
+            return
+        self._desired_backlight = value
         self._restore_backlight()
 
     def on_arduino_ready(self) -> None:
