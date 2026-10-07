@@ -164,7 +164,7 @@ class KeypadMqttClient:
             elif topic == f"{self._prefix}/backlight/set":
                 self._handle_backlight(payload)
             elif topic == f"{self._prefix}/backlight/state":
-                self._handle_backlight_state(payload)
+                self._handle_backlight_state(payload, retained=bool(msg.retain))
             elif topic == f"{self._prefix}/tone/set":
                 self._handle_tone(payload)
             elif topic == f"{self._prefix}/reset/set":
@@ -216,6 +216,11 @@ class KeypadMqttClient:
 
     def _handle_backlight(self, payload: str) -> None:
         on = payload.upper() in ("ON", "1", "TRUE")
+        # Record synchronously rather than waiting for our own state publish to
+        # come back round: a command issued while the Arduino is still in its
+        # bootloader is discarded, and if the banner beats the echo the restore
+        # would run against the stale value and strand the keypad backwards.
+        self._desired_backlight = "ON" if on else "OFF"
         cmd = build_backlight_command(on, source="mqtt:backlight")
         self._writer.enqueue(cmd)
         self._publish(
@@ -224,13 +229,17 @@ class KeypadMqttClient:
             retain=True,
         )
 
-    def _handle_backlight_state(self, payload: str) -> None:
-        """Record our own retained backlight state.
+    def _handle_backlight_state(self, payload: str, retained: bool = False) -> None:
+        """Seed the desired backlight from the broker's stored value.
 
-        Deliberately does not drive the keypad -- _handle_backlight
-        publishes here, so acting on it would loop.  The value is only
-        used once, to restore the backlight after a restart.
+        Only *retained* delivery counts.  MQTT sets the retain flag just on
+        the copy replayed when we subscribe; the echo of our own publishes
+        arrives with it clear.  Taking only the retained one means this
+        never fights _handle_backlight, which already records live commands
+        itself, and never drives the keypad from our own echo.
         """
+        if not retained:
+            return
         self._desired_backlight = payload.upper()
         self._restore_backlight()
 
