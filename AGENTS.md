@@ -19,31 +19,69 @@ tests/             - pytest tests (run with `pytest`)
 
 ## Deployment
 
-The service runs on `pi@raspberrypi-zerow` (Raspbian Bookworm, Python 3.11, armv6l) as a rootless Podman container managed by a quadlet.
+The service runs on `pi@raspberrypi-zerow` (Raspbian Bookworm, Python 3.11, armv6l) as a
+rootless **systemd user unit running from a git checkout + venv** — not a container.
 
-- Image: `ghcr.io/brianegge/keypad6160:latest` (built for `linux/arm/v6` and `linux/amd64`)
-- Quadlet: `~/.config/containers/systemd/keypad6160.container`
-- Environment: `~/.config/containers/systemd/keypad6160.env`
-- Auto-update: enabled via `io.containers.autoupdate=registry` label
-- CI publishes to GHCR on every push to `master` (`.github/workflows/publish.yml`)
+- Unit: `~/.config/systemd/user/keypad6160.service` (`Type=simple`, `Restart=always`)
+- Code: `/home/pi/6160-st-device`, a git checkout of `master`
+- Entry point: `/home/pi/6160-st-device/venv/bin/keypad6160`. It is an *editable* install
+  (`_editable_impl_keypad6160.pth` points at `src/`), so `git pull` really does change the
+  running code — no reinstall step.
+- Environment: `~/.config/containers/systemd/keypad6160.env`. The path is a leftover from the
+  container era, but the unit genuinely reads it.
 
 Deploy updates (merge to master, then pull on the Pi):
 
 ```bash
-ssh pi@raspberrypi-zerow 'podman auto-update'
+ssh pi@raspberrypi-zerow 'cd ~/6160-st-device && git pull && systemctl --user restart keypad6160'
 ```
 
-View logs:
+**Verify a deploy by the Arduino's boot banner, never by systemd.** Restarting reopens the
+serial port, which asserts DTR and resets the Mega into its STK500 bootloader. Both
+`systemctl is-active` and the `/health` endpoint report perfectly healthy while the keypad is
+dead, so neither is evidence. Confirm in the log:
+
+1. `<< USB2keybus initialized` — can take 15-25 s to appear.
+2. `Arduino application ready — keepalive armed`.
+3. `>> [init] ... 1=Raspberry Pi OK`.
+
+If the banner has not appeared within ~60 s, roll back. A keypad showing `Open Ckt` with a
+dark backlight is the 6160's own panel-comm-loss message, meaning the Arduino is not driving
+the keybus — it is not something this service prints.
+
+### Legacy container deployment (not in use)
+
+`quadlet/`, `Containerfile`, `ghcr.io/brianegge/keypad6160:latest` and
+`.github/workflows/publish.yml` are left over from an earlier rootless-Podman deployment. CI
+still builds and pushes the image, but nothing consumes it, and stale
+`keypad6160.container`/`keypad6160.env` quadlet files remain on the Pi without a running
+container. `podman auto-update` and `podman logs keypad6160` will not deploy or debug
+anything here.
+
+### Logs
+
+The Pi keeps no durable local log: journald is `Storage=volatile`, `journalctl --user -u
+keypad6160` returns "No journal files were found", and the service's output does not land in
+the Pi's `/var/log/syslog` either. rsyslog forwards to LibreNMS on `ubuntu24`
+(192.168.254.35:514), which holds the only usable history.
+
+**Run the query on `ubuntu24`, not on the Pi** — the `librenms-db` container below exists
+only there, so running it on the Pi just reports a missing container:
 
 ```bash
-ssh pi@raspberrypi-zerow 'podman logs -f keypad6160'
+# on ubuntu24
+sudo podman exec librenms-db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" \
+  mariadb -u librenms librenms -e \
+  "SELECT timestamp, msg FROM syslog WHERE device_id=86 AND program=\"KEYPAD6160\" \
+   ORDER BY timestamp DESC LIMIT 50;"'
 ```
 
-Restart the service:
+The single quotes matter: `$MYSQL_PASSWORD` is expanded by the shell *inside* the container,
+which already has it, so the password never appears in a process listing or in sudo/audit
+logs on either side, and there is no need to read it out of the quadlet file.
 
-```bash
-ssh pi@raspberrypi-zerow 'systemctl --user restart keypad6160'
-```
+Every line is stored **twice** — `/etc/rsyslog.d/50-librenms.conf` and `99-librenms.conf` both
+forward to the same collector — so any count needs halving.
 
 ## Hardware
 
