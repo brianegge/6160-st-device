@@ -316,3 +316,72 @@ class TestHaDiscovery:
             for key in ("command_topic", "state_topic", "availability_topic"):
                 if key in data:
                     assert data[key].startswith("custom/prefix/")
+
+
+class TestBacklightRestore:
+    """The Arduino comes up with the backlight on after a reset, and the
+    banner's "Raspberry Pi OK" frame carries b=1, so an operator's earlier
+    "off" is undone on every restart unless it is restored from the broker's
+    retained state."""
+
+    def test_off_is_restored_after_banner(self, mqtt_client, writer):
+        mqtt_client._handle_backlight_state("OFF")
+        assert writer.enqueue.call_count == 0  # Arduino not up yet
+        mqtt_client.on_arduino_ready()
+        writer.enqueue.assert_called_once()
+        assert "b=0" in writer.enqueue.call_args[0][0].payloads[0]
+
+    def test_not_restored_while_arduino_still_in_bootloader(self, mqtt_client, writer):
+        """Anything written before the banner is swallowed by the bootloader
+        and then overwritten by the banner's own frame."""
+        mqtt_client._handle_backlight_state("OFF")
+        writer.enqueue.assert_not_called()
+
+    def test_retained_state_arriving_after_banner_still_restores(self, mqtt_client, writer):
+        """Ordering between the retained message and the banner is not
+        guaranteed, so either arrival order must work."""
+        mqtt_client.on_arduino_ready()
+        writer.enqueue.assert_not_called()
+        mqtt_client._handle_backlight_state("OFF")
+        writer.enqueue.assert_called_once()
+        assert "b=0" in writer.enqueue.call_args[0][0].payloads[0]
+
+    def test_on_needs_no_frame(self, mqtt_client, writer):
+        """The Arduino already boots with the backlight on."""
+        mqtt_client._handle_backlight_state("ON")
+        mqtt_client.on_arduino_ready()
+        writer.enqueue.assert_not_called()
+
+    def test_no_restore_without_retained_state(self, mqtt_client, writer):
+        """Nothing remembered — leave the keypad alone."""
+        mqtt_client.on_arduino_ready()
+        writer.enqueue.assert_not_called()
+
+    def test_state_publish_does_not_loop(self, mqtt_client, writer):
+        """_handle_backlight publishes to backlight/state, which we also
+        subscribe to; acting on the echo would drive the keypad in a loop."""
+        mqtt_client._handle_backlight_state("OFF")
+        mqtt_client.on_arduino_ready()
+        writer.enqueue.reset_mock()
+        for _ in range(5):
+            mqtt_client._handle_backlight_state("OFF")
+        writer.enqueue.assert_not_called()
+
+    def test_restored_again_after_dtr_auto_reset(self, mqtt_client, writer):
+        """A mid-run auto-reset reboots the Arduino with the backlight back
+        on, so the restore has to re-arm rather than fire once per process."""
+        mqtt_client._handle_backlight_state("OFF")
+        mqtt_client.on_arduino_ready()
+        assert writer.enqueue.call_count == 1
+        writer.enqueue.reset_mock()
+        mqtt_client.on_arduino_ready()  # second banner after a DTR reset
+        writer.enqueue.assert_called_once()
+        assert "b=0" in writer.enqueue.call_args[0][0].payloads[0]
+
+    def test_subscribes_to_state_topic(self, mqtt_client):
+        rc = MagicMock()
+        rc.is_failure = False
+        mqtt_client._on_connect(mqtt_client._client, None, MagicMock(), rc)
+        topics = [t for call in mqtt_client._client.subscribe.call_args_list
+                  for t, _qos in call[0][0]]
+        assert "test/6160/backlight/state" in topics
