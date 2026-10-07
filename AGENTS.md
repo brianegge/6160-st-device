@@ -65,17 +65,20 @@ keypad6160` returns "No journal files were found", and the service's output does
 the Pi's `/var/log/syslog` either. rsyslog forwards to LibreNMS on `ubuntu24`
 (192.168.254.35:514), which holds the only usable history.
 
-**Run the query on `ubuntu24`, not on the Pi** — the config file and the `librenms-db`
-container below exist only there, so running it on the Pi just reports a missing file and a
-missing container:
+**Run the query on `ubuntu24`, not on the Pi** — the `librenms-db` container below exists
+only there, so running it on the Pi just reports a missing container:
 
 ```bash
 # on ubuntu24
-PW=$(sudo grep -oP 'MYSQL_PASSWORD=\K\S+' /etc/containers/systemd/librenms-db.container)
-sudo podman exec librenms-db mariadb -u librenms -p"$PW" librenms -e \
-  "SELECT timestamp, msg FROM syslog WHERE device_id=86 AND program='KEYPAD6160' \
-   ORDER BY timestamp DESC LIMIT 50;"
+sudo podman exec librenms-db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" \
+  mariadb -u librenms librenms -e \
+  "SELECT timestamp, msg FROM syslog WHERE device_id=86 AND program=\"KEYPAD6160\" \
+   ORDER BY timestamp DESC LIMIT 50;"'
 ```
+
+The single quotes matter: `$MYSQL_PASSWORD` is expanded by the shell *inside* the container,
+which already has it, so the password never appears in a process listing or in sudo/audit
+logs on either side, and there is no need to read it out of the quadlet file.
 
 Every line is stored **twice** — `/etc/rsyslog.d/50-librenms.conf` and `99-librenms.conf` both
 forward to the same collector — so any count needs halving.
