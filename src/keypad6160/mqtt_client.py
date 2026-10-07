@@ -38,6 +38,11 @@ class KeypadMqttClient:
         self._writer = writer
         self._notices = notices
         self._prefix = config.mqtt_topic_prefix
+        # Backlight is restored from the retained backlight/state topic on
+        # start; see _restore_backlight.
+        self._desired_backlight: str | None = None
+        self._backlight_restored = False
+        self._arduino_ready = False
 
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
@@ -124,6 +129,9 @@ class KeypadMqttClient:
             (f"{self._prefix}/message/1/set", 1),
             (f"{self._prefix}/message/2/set", 1),
             (f"{self._prefix}/backlight/set", 1),
+            # Our own retained state, republished by the broker on connect:
+            # this is how the backlight survives a restart.
+            (f"{self._prefix}/backlight/state", 1),
             (f"{self._prefix}/reset/set", 1),
             (f"{self._prefix}/tone/set", 1),
             (f"{self._prefix}/notice/set", 1),
@@ -155,6 +163,8 @@ class KeypadMqttClient:
                 self._handle_line_message(2, payload)
             elif topic == f"{self._prefix}/backlight/set":
                 self._handle_backlight(payload)
+            elif topic == f"{self._prefix}/backlight/state":
+                self._handle_backlight_state(payload, retained=bool(msg.retain))
             elif topic == f"{self._prefix}/tone/set":
                 self._handle_tone(payload)
             elif topic == f"{self._prefix}/reset/set":
@@ -187,7 +197,8 @@ class KeypadMqttClient:
         data = json.loads(raw)
         text = data.get("text", "")
         line_no = data.get("line_no", "1")
-        backlight = data.get("backlight", "1")
+        # Absent means "leave the backlight as it is", not "turn it on".
+        backlight = data.get("backlight")
         cmd = build_raw_message(line_no, text, backlight=backlight, source="mqtt:json")
         self._writer.enqueue(cmd)
 
@@ -206,12 +217,78 @@ class KeypadMqttClient:
 
     def _handle_backlight(self, payload: str) -> None:
         on = payload.upper() in ("ON", "1", "TRUE")
+        # Record synchronously rather than waiting for our own state publish to
+        # come back round: a command issued while the Arduino is still in its
+        # bootloader is discarded, and if the banner beats the echo the restore
+        # would run against the stale value and strand the keypad backwards.
+        self._desired_backlight = "ON" if on else "OFF"
         cmd = build_backlight_command(on, source="mqtt:backlight")
         self._writer.enqueue(cmd)
         self._publish(
             f"{self._prefix}/backlight/state",
             "ON" if on else "OFF",
             retain=True,
+        )
+
+    def _handle_backlight_state(self, payload: str, retained: bool = False) -> None:
+        """Seed the desired backlight from the broker's stored value.
+
+        Only *retained* delivery counts.  MQTT sets the retain flag just on
+        the copy replayed when we subscribe; the echo of our own publishes
+        arrives with it clear.  Taking only the retained one means this
+        never fights _handle_backlight, which already records live commands
+        itself, and never drives the keypad from our own echo.
+        """
+        if not retained:
+            return
+        if self._desired_backlight is not None:
+            # A live command already told us what is wanted; a retained
+            # replay arriving late is older news and must not undo it.
+            return
+        value = payload.strip().upper()
+        if value not in ("ON", "OFF"):
+            # A zero-length payload is how a retained topic is cleared, so
+            # this means "nothing remembered" -- not "turn it off".
+            return
+        self._desired_backlight = value
+        self._restore_backlight()
+
+    def on_arduino_ready(self) -> None:
+        """Called on every Arduino boot banner.
+
+        Re-arms the restore each time: a DTR auto-reset mid-run reboots the
+        Arduino with the backlight back on, so the restore has to run again,
+        not just once per process.
+        """
+        self._arduino_ready = True
+        self._backlight_restored = False
+        self._restore_backlight()
+
+    def _restore_backlight(self) -> None:
+        """Re-apply the backlight the broker remembers, once per Arduino boot.
+
+        A restart resets the Arduino, which comes up with the backlight on,
+        and the banner's "Raspberry Pi OK" frame carries b=1 -- so an
+        operator's earlier "off" is silently undone on every restart.  The
+        retained state topic is the only record of what was actually
+        wanted.
+
+        Must wait for the Arduino: during the ~15-25 s the bootloader owns
+        the port, anything written is discarded, and the banner's own frame
+        would overwrite it anyway.  The retained message normally arrives
+        long before the banner, so in practice this fires from
+        on_arduino_ready.
+        """
+        if self._backlight_restored or not self._arduino_ready:
+            return
+        if self._desired_backlight is None:
+            return
+        self._backlight_restored = True
+        if self._desired_backlight == "ON":
+            return  # already on after reset -- no frame needed
+        log.info("Restoring backlight %s from retained state", self._desired_backlight)
+        self._writer.enqueue(
+            build_backlight_command(False, source="mqtt:restore")
         )
 
     def _handle_notice_set(self, payload: str) -> None:

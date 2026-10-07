@@ -71,7 +71,12 @@ def build_message(line_no: int | str, text: str, quiet: bool = False, source: st
     are applied.  When a tone > 0 is set, a follow-up command resets the tone
     after a 1.5 s delay so the keypad doesn't beep indefinitely.
     """
-    args = ALARM_STATES.get(text, "b=1 c=1 t=0 ")
+    # No b= in the generic case: SerialIO re-attaches the backlight that is
+    # actually in effect.  Hard-coding b=1 here turned the backlight back on
+    # at every clock tick and notice rotation, so it could never stay off.
+    # ALARM_STATES entries keep their own b= -- those are deliberate (Armed
+    # Away goes dark because nobody is home).
+    args = ALARM_STATES.get(text, "c=1 t=0 ")
     payload = f"F7 {args}{line_no}={text:<16}\n"
 
     # Check if a non-zero tone was set (t=1..9)
@@ -96,12 +101,16 @@ def build_message(line_no: int | str, text: str, quiet: bool = False, source: st
 def build_raw_message(
     line_no: int | str,
     text: str,
-    backlight: str = "1",
+    backlight: str | None = None,
     source: str = "",
 ) -> SerialCommand:
-    """Build an F7 command with explicit parameters (no alarm-state lookup)."""
+    """Build an F7 command with explicit parameters (no alarm-state lookup).
+
+    *backlight* of None means "leave it alone": SerialIO fills in whatever is
+    currently in effect.  Pass "0"/"1" only to deliberately change it.
+    """
     text = shorten(text)
-    args = f"b={backlight} t=0 "
+    args = f"b={backlight} t=0 " if backlight is not None else "t=0 "
     payload = f"F7 {args}{line_no}={text:16.16}\n"
     return SerialCommand(payloads=[payload], source=source, coalesce_key=f"line:{line_no}")
 
