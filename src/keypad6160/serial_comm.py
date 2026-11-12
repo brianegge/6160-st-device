@@ -40,15 +40,42 @@ class _CoalescingQueue:
         self._lock = threading.Lock()
         self._not_empty = threading.Condition(self._lock)
 
+    def _urgent_end(self) -> int:
+        """Index just past the leading run of reset/priority items."""
+        idx = 0
+        for it in self._items:
+            if it is None or not (it.reset or it.priority):
+                break
+            idx += 1
+        return idx
+
     def put(self, item: SerialCommand | None) -> None:
-        """Append *item*, dropping any pending item with the same coalesce_key."""
+        """Add *item*, dropping any pending item with the same coalesce_key.
+
+        Reset/priority items are inserted at the front (after any urgent
+        items already there) so they are not stuck behind a held throttled
+        command; everything else appends in FIFO order.  Once a shutdown
+        sentinel (None) is pending, put() no longer inserts new urgent
+        items ahead of it, so newly enqueued priority/reset traffic (e.g.
+        an error storm) cannot starve shutdown.  (requeue_front() may
+        still re-insert an already-popped held item ahead of the sentinel
+        to preserve draining order — that is one bounded item, not a
+        stream.)
+        """
         with self._not_empty:
             if item is not None and item.coalesce_key:
                 self._items = [
                     i for i in self._items
                     if i is None or i.coalesce_key != item.coalesce_key
                 ]
-            self._items.append(item)
+            if (
+                item is not None
+                and (item.reset or item.priority)
+                and not any(i is None for i in self._items)
+            ):
+                self._items.insert(self._urgent_end(), item)
+            else:
+                self._items.append(item)
             self._not_empty.notify()
 
     def get(self, timeout: float | None = None) -> SerialCommand | None:
@@ -59,21 +86,119 @@ class _CoalescingQueue:
                     raise queue.Empty
             return self._items.pop(0)
 
+    def requeue_front(self, item: SerialCommand) -> None:
+        """Put a popped-but-not-yet-sent item back at the head of the queue,
+        behind any urgent (reset/priority) items that arrived meanwhile.
+
+        If a newer item with the same coalesce_key arrived in the meantime,
+        the held item is stale and is dropped instead of re-inserted.
+        """
+        with self._not_empty:
+            if item.coalesce_key and any(
+                i is not None and i.coalesce_key == item.coalesce_key
+                for i in self._items
+            ):
+                return
+            self._items.insert(self._urgent_end(), item)
+            self._not_empty.notify()
+
+    def has_key(self, key: str) -> bool:
+        """True if any pending item carries *key* as its coalesce_key.
+
+        Advisory only — the lock is released on return, so use
+        put_unless_pending() for a check that must be atomic with the
+        enqueue.
+        """
+        with self._not_empty:
+            return any(
+                i is not None and i.coalesce_key == key for i in self._items
+            )
+
+    def put_unless_pending(self, item: SerialCommand, key: str) -> bool:
+        """Atomically add *item* unless an item with coalesce_key *key* is
+        already pending; returns True if it was added.
+
+        Unlike put(), this never coalesces an existing item away — it is
+        for background updates (the line-2 clock) that must yield to an
+        explicit pending command rather than replace it.
+        """
+        with self._not_empty:
+            if any(
+                i is not None and i.coalesce_key == key for i in self._items
+            ):
+                return False
+            if (item.reset or item.priority) and not any(
+                i is None for i in self._items
+            ):
+                self._items.insert(self._urgent_end(), item)
+            else:
+                self._items.append(item)
+            self._not_empty.notify()
+            return True
+
 # Matches a line-text field: space + line number (1 or 2) + = + 16 chars.
 _LINE_RE = re.compile(r" ([12])=(.{16})")
+
+# Matches the backlight flag in an F7 argument string.
+_BACKLIGHT_RE = re.compile(r"\bb=([01])")
 
 # Pacing delay after each serial write, in seconds.  Must exceed the time the
 # Arduino needs to relay a full F7 frame on the 4800-baud keybus (~100 ms) plus
 # margin, so back-to-back writes don't overrun its 256-byte USB rx buffer.
+# This blocking response-drain delay runs INSIDE the (much larger)
+# _MIN_WRITE_INTERVAL_S window; it is not additional spacing between frames.
 _POST_WRITE_DELAY_S = 0.35
+
+# Minimum gap between serial frames, in seconds.  Bursts of display updates
+# (13+ frames/min, some sub-second apart) flood the keybus and put the keypad
+# into a fast beep until traffic subsides.  While a command waits out this
+# interval it stays in the coalescing queue, so a burst collapses to the
+# latest text instead of being sent frame by frame.  Enforced between
+# commands and between the payloads of one command; must stay well above
+# _POST_WRITE_DELAY_S, which nests inside it.  Priority/reset commands are
+# exempt.
+_MIN_WRITE_INTERVAL_S = 2.0
+
+# Poll step while waiting out _MIN_WRITE_INTERVAL_S, so unsolicited data
+# (e.g. keypresses) is still read promptly during the wait.
+_THROTTLE_POLL_S = 0.1
+
+# Send a quiet keepalive frame when the port has been idle this long.
+#
+# The Arduino re-sends its current F7 on the keybus by itself 4 s after the
+# last one it relayed (KP_F7_PERIOD in USB2keybus.ino).  Its SoftwareSerial
+# bit-bangs each keybus byte with interrupts disabled, and the Mega's UART
+# only buffers two bytes, so any frame we write during that ~100 ms
+# transmit loses bytes in ~20-byte chunks — the 'F7outside' /
+# 'F7t=0 1=Re Car o' garbles in the log.  _POST_WRITE_DELAY_S covers the
+# relay of our own frame, but the periodic re-send fires on the Arduino's
+# clock and we can't see it coming.  Writing something ourselves before
+# the 4 s elapse restarts that timer, so the periodic re-send never fires
+# and every keybus F7 transmit is one we scheduled.  Must stay below 4 s
+# by enough to absorb our own scheduling jitter, and above
+# _MIN_WRITE_INTERVAL_S so a held display update is always sent instead.
+_KEEPALIVE_INTERVAL_S = 3.5
+
+# Hold writes this long after a DTR reset — the Arduino's bootloader owns
+# the port for ~1.6-2 s after reset and silently discards frames.  Unlike
+# the flood throttle, this hold applies to priority commands too: nothing
+# useful can be written to a rebooting device.  Only reset commands are
+# exempt (a second DTR toggle during boot just restarts the boot).
+_POST_RESET_HOLD_S = 2.0
+
+# Line-2 clock/notice updates tick at most this often.  Callers may poll
+# _update_line2 far more frequently (the throttle wait polls at 10 Hz);
+# without this floor each poll would advance the notice rotation.
+_LINE2_TICK_INTERVAL_S = 1.0
 
 # Minimum interval between auto-resets triggered by Arduino error lines.
 _AUTO_RESET_COOLDOWN_S = 60.0
 
-# Consecutive ERR_ lines required before triggering a DTR reset.  Isolated
-# garbles self-recover on the Arduino without intervention; resetting on the
-# first error makes the keypad audibly beep during the ~2 s reboot window.
-_AUTO_RESET_ERROR_THRESHOLD = 3
+# Two ERR_ lines within this window trigger a DTR reset.  An unbounded
+# consecutive-error count is wrong in both directions: a wedge after one
+# error persists for hours until a third stray garble arrives, while a
+# stray garble hours later triggers an audible reset that wasn't needed.
+_ERR_STRIKE_WINDOW_S = 120.0
 
 _KEY_CODES: dict[int, str] = {
     **{i: str(i) for i in range(10)},
@@ -100,11 +225,21 @@ class SerialIO(threading.Thread):
         self._notice_manager: NoticeManager | None = None
         self._last_line2 = ""
         self._display: dict[int, str] = {1: " " * 16, 2: " " * 16}
+        # Last backlight flag sent; re-attached to frames that omit b=.
+        self._backlight = "1"
+        self._last_write_monotonic: float | None = None
+        # True only once the Arduino has announced its boot banner, i.e.
+        # the application is running rather than the bootloader.  Gates
+        # the keepalive; see _keepalive_due_s.
+        self._app_ready = False
         # Init far enough in the past that the first ERR_ always passes the
         # cooldown check.  monotonic() can be tiny (< 60s) on freshly-booted
         # hosts (e.g. CI runners), making 0.0 unsafe.
         self._last_auto_reset_monotonic: float = -_AUTO_RESET_COOLDOWN_S
-        self._consecutive_errors: int = 0
+        self._last_err_monotonic: float = -_ERR_STRIKE_WINDOW_S
+        self._next_write_ok_monotonic: float = 0.0
+        self._post_reset_hold_monotonic: float = 0.0
+        self._next_line2_tick_monotonic: float = 0.0
 
     def enqueue(self, cmd: SerialCommand) -> None:
         """Thread-safe enqueue of a command."""
@@ -129,6 +264,10 @@ class SerialIO(threading.Thread):
 
     def _reconnect(self) -> None:
         """Close the port and reopen it after a delay."""
+        # Reopening asserts DTR and resets the board back into its
+        # bootloader, so liveness has to be re-proven before keepalives
+        # resume.
+        self._app_ready = False
         try:
             self._port.close()
         except Exception:
@@ -153,16 +292,35 @@ class SerialIO(threading.Thread):
         """Drain the command queue; between commands, read async data and tick the clock."""
         while True:
             try:
-                cmd = self._queue.get(timeout=self._port.timeout)
+                cmd = self._queue.get(timeout=self._queue_wait_s())
             except queue.Empty:
                 # No queued command — read unsolicited data and update clock
-                self._read_unsolicited()
-                self._update_line2()
+                self._idle_tick()
+                self._maybe_keepalive()
                 continue
 
             if cmd is None:
                 log.info("SerialIO received shutdown sentinel")
                 return
+            if not cmd.reset:
+                now = monotonic()
+                # The post-reset hold gates everything (the device is
+                # rebooting); the flood throttle additionally gates
+                # non-priority display traffic.
+                wait = self._post_reset_hold_monotonic - now
+                if not cmd.priority:
+                    wait = max(wait, self._next_write_ok_monotonic - now)
+                if wait > 0:
+                    # Too soon to write — hold the command in the queue
+                    # (where a newer same-key update may replace it, and
+                    # urgent commands jump ahead of it) and keep servicing
+                    # incoming data while the interval elapses.  The clock
+                    # still ticks here: during a sustained burst the queue
+                    # never drains, so notice updates would otherwise stall.
+                    self._queue.requeue_front(cmd)
+                    self._idle_tick()
+                    sleep(min(_THROTTLE_POLL_S, wait))
+                    continue
             try:
                 self._execute(cmd)
             except (serial.SerialException, OSError):
@@ -178,6 +336,20 @@ class SerialIO(threading.Thread):
             self._reset_device()
             return
         for i, payload in enumerate(cmd.payloads):
+            if i > 0:
+                # The minimum frame gap applies inside a multi-payload
+                # command too (tone + reset would otherwise go out 1.85 s
+                # apart, under the floor), and the post-reset hold applies
+                # even to priority commands — an auto-reset can fire from
+                # the previous payload's response drain.
+                now = monotonic()
+                remaining = self._post_reset_hold_monotonic - now
+                if not cmd.priority:
+                    remaining = max(
+                        remaining, self._next_write_ok_monotonic - now
+                    )
+                if remaining > 0:
+                    sleep(remaining)
             payload = self._ensure_both_lines(payload)
             if not cmd.quiet:
                 log.info(">> [%s] %s", cmd.source, payload.strip())
@@ -185,10 +357,77 @@ class SerialIO(threading.Thread):
                 log.debug(">> [%s] %s", cmd.source, payload.strip())
             self._port.write(payload.encode("ascii"))
             self._port.flush()
+            now = monotonic()
+            self._next_write_ok_monotonic = now + _MIN_WRITE_INTERVAL_S
+            self._last_write_monotonic = now
             # Delay between payloads (e.g. tone-reset needs 1.5 s)
             if i < len(cmd.delays):
                 sleep(cmd.delays[i])
             self._read_response(cmd.source)
+
+    def _idle_tick(self) -> None:
+        """What SerialIO does when it is not writing: service incoming
+        data and keep the line-2 clock/notices current.  Shared by the
+        empty-queue and throttle-wait paths so both stay in sync."""
+        self._read_unsolicited()
+        self._update_line2()
+
+    def _keepalive_due_s(self) -> float | None:
+        """Seconds until the next keepalive is due, or None if not armed.
+
+        Armed only once the Arduino has sent its boot banner, and only
+        after we have written at least one frame.  The banner gate is the
+        important one, and it is why this is not simply a timer:
+
+        Opening the port asserts DTR, which auto-resets the Mega into its
+        STK500 bootloader, and the bootloader only hands off to the
+        application once the port falls quiet.  A keepalive is by
+        definition traffic that never falls quiet, so an ungated one pins
+        the board in the bootloader forever — no banner, no F7 on the
+        keybus, and the 6160 shows its comm-loss display while this
+        process happily writes well-formed frames into the void.  That is
+        exactly what shipping this ungated did (see the revert of #42).
+
+        So the keepalive is strictly opt-in on proven liveness: no
+        banner, no keepalive, and the service degrades to the original
+        event-driven write pattern that is known to let the bootloader
+        time out.  Deferred past the post-reset hold for the same reason.
+        """
+        if not self._app_ready or self._last_write_monotonic is None:
+            return None
+        due = max(
+            self._last_write_monotonic + _KEEPALIVE_INTERVAL_S,
+            self._post_reset_hold_monotonic,
+        )
+        return due - monotonic()
+
+    def _queue_wait_s(self) -> float:
+        """How long the run loop may block on the queue: the port timeout,
+        shortened so an idle loop wakes in time for the keepalive.  The
+        Arduino's 4 s window leaves only ~0.5 s of slack past the keepalive
+        interval; a full 1 s port timeout would blow through it."""
+        wait = self._port.timeout
+        due = self._keepalive_due_s()
+        if due is not None:
+            wait = min(wait, max(0.0, due))
+        return wait
+
+    def _maybe_keepalive(self) -> None:
+        """Enqueue a quiet keepalive if the port has been idle too long.
+
+        Only reached from the empty-queue path: while a command is held by
+        the throttle it goes out within _MIN_WRITE_INTERVAL_S of the last
+        write and is the keepalive.
+        """
+        due = self._keepalive_due_s()
+        if due is None or due > 0:
+            return
+        self.enqueue(SerialCommand(
+            payloads=["F7 t=0\n"],
+            quiet=True,
+            source="keepalive",
+            coalesce_key="keepalive",
+        ))
 
     def _ensure_both_lines(self, payload: str) -> str:
         """Rewrite an F7 payload to always include both 1= and 2= fields.
@@ -196,6 +435,10 @@ class SerialIO(threading.Thread):
         The Arduino parser can misinterpret parameters like ``c=1`` as
         line-1 display text when only one line field is present.  By
         always sending both lines we eliminate the ambiguity.
+
+        The backlight flag is likewise sticky here: the Arduino turns the
+        backlight OFF on any frame that omits ``b=``, so a bare tone,
+        err-refresh or keepalive frame would otherwise blank it.
         """
         if not payload.startswith("F7 "):
             return payload
@@ -209,20 +452,39 @@ class SerialIO(threading.Thread):
             # display lines so the Arduino receives a complete F7 frame.
             args = payload[3:].rstrip()
             if args:
-                return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
+                return self._full_frame(args)
             return payload
         for m in matches:
             self._display[int(m.group(1))] = m.group(2)
         # Everything between "F7 " and the first line field is flags/args.
         args = payload[3:matches[0].start()].rstrip()
+        return self._full_frame(args)
+
+    def _full_frame(self, args: str) -> str:
+        """Assemble a complete F7 frame from *args*, the remembered
+        backlight flag and both display lines."""
+        m = _BACKLIGHT_RE.search(args)
+        if m:
+            self._backlight = m.group(1)
+        else:
+            args = f"b={self._backlight} {args}"
         return f"F7 {args} 1={self._display[1]} 2={self._display[2]}\n"
 
     def _reset_device(self) -> None:
-        """Reset the Arduino by toggling the DTR line."""
+        """Reset the Arduino by toggling the DTR line.
+
+        Also holds ALL subsequent writes (priority included) for
+        _POST_RESET_HOLD_S: the bootloader owns the port for ~2 s after
+        reset and silently discards frames.
+        """
         log.info("Resetting Arduino via DTR toggle")
+        # Back into the bootloader — stop keepalives until the banner says
+        # the application is running again, or they would pin it there.
+        self._app_ready = False
         self._port.dtr = False
         sleep(0.1)
         self._port.dtr = True
+        self._post_reset_hold_monotonic = monotonic() + _POST_RESET_HOLD_S
 
     # -- Reading -----------------------------------------------------------
 
@@ -255,42 +517,69 @@ class SerialIO(threading.Thread):
     def _handle_line(self, line: str) -> None:
         """Dispatch an incoming line from the Arduino to the appropriate handler."""
         if "initialized" in line:
-            self._consecutive_errors = 0
+            self._last_err_monotonic = -_ERR_STRIKE_WINDOW_S
+            if not self._app_ready:
+                # One info line per Arduino boot: the only positive proof
+                # in the log that the application (not the bootloader) is
+                # running and that the keepalive is actually active.
+                log.info(
+                    "Arduino application ready — keepalive armed (every %.1fs)",
+                    _KEEPALIVE_INTERVAL_S,
+                )
+            self._app_ready = True
             self.enqueue(build_message(1, "Raspberry Pi OK", source="init"))
             if self._on_initialized:
                 self._on_initialized()
         elif line.startswith("KEYS_"):
-            self._consecutive_errors = 0
             self._handle_keys(line)
         elif line.startswith("ERR_"):
             self._handle_error_line(line)
-        else:
-            self._consecutive_errors = 0
 
     def _handle_error_line(self, line: str) -> None:
-        """Arduino reported a parser error; reset only after several consecutive
-        errors, since isolated garbles self-recover on the Arduino without
-        intervention and a DTR reset audibly beeps the keypad.
+        """Arduino reported a parser error.
+
+        Every error gets a quiet display refresh: the garbled frame may have
+        latched a tone (t=4 is a continuous fast beep) or left stale text, and
+        resending the current display with t=0 clears both within a second.
+
+        An isolated error otherwise self-recovers on the Arduino, and a DTR
+        reset audibly beeps the keypad, so only a second error within
+        _ERR_STRIKE_WINDOW_S — a sign the Arduino is wedged rather than
+        recovering — triggers a reset (rate-limited by the cooldown).
         """
-        self._consecutive_errors += 1
-        if self._consecutive_errors < _AUTO_RESET_ERROR_THRESHOLD:
+        now = monotonic()
+        prior_err = self._last_err_monotonic
+        self._last_err_monotonic = now
+        self._refresh_display()
+        if now - prior_err >= _ERR_STRIKE_WINDOW_S:
             log.warning(
-                "Arduino error %r (%d/%d before reset)",
-                line, self._consecutive_errors, _AUTO_RESET_ERROR_THRESHOLD,
+                "Arduino error %r — refreshing display (reset on 2nd error "
+                "within %.0fs)", line, _ERR_STRIKE_WINDOW_S,
             )
             return
-        now = monotonic()
         if now - self._last_auto_reset_monotonic < _AUTO_RESET_COOLDOWN_S:
             log.warning("Arduino error %r (auto-reset in cooldown)", line)
-            # Require a fresh streak of errors after cooldown elapses, rather
-            # than letting a single straggling error trigger a reset the moment
-            # the cooldown window ends.
-            self._consecutive_errors = 0
             return
         log.warning("Arduino error %r — auto-resetting via DTR", line)
         self._last_auto_reset_monotonic = now
-        self._consecutive_errors = 0
+        # Don't pair a post-reset garble with a pre-reset one.
+        self._last_err_monotonic = -_ERR_STRIKE_WINDOW_S
         self._reset_device()
+
+    def _refresh_display(self) -> None:
+        """Enqueue a quiet t=0 frame; _ensure_both_lines attaches the current
+        display text, restoring whatever the garbled frame corrupted.
+
+        Marked priority: a garbled frame may have latched t=4 (continuous
+        fast beep), so the clear must not wait out the write throttle.
+        """
+        self.enqueue(SerialCommand(
+            payloads=["F7 t=0\n"],
+            quiet=True,
+            priority=True,
+            source="err-refresh",
+            coalesce_key="refresh",
+        ))
 
     def _handle_keys(self, line: str) -> None:
         """Parse KEYS message and invoke callback for each key press."""
@@ -306,13 +595,35 @@ class SerialIO(threading.Thread):
                     self.on_keypress(key)
 
     def _update_line2(self) -> None:
-        """Push the current notice text to keypad line 2 if it has changed."""
+        """Push the current notice text to keypad line 2 if it has changed.
+
+        Rate-limited to _LINE2_TICK_INTERVAL_S because get_current_display()
+        advances the notice rotation on every call, and callers (the 10 Hz
+        throttle wait in particular) may poll much faster.  Skipped entirely
+        while an explicit line-2 command is pending, so a background clock
+        tick can never coalesce away a user message before it is written.
+        """
         if self._notice_manager is None:
             return
+        now = monotonic()
+        if now < self._next_line2_tick_monotonic:
+            return
+        # Advisory pre-check so a pending explicit command doesn't cost a
+        # rotation advance; the enqueue below re-checks atomically.
+        if self._queue.has_key("line:2"):
+            return
+        self._next_line2_tick_monotonic = now + _LINE2_TICK_INTERVAL_S
         text = self._notice_manager.get_current_display()
         if text != self._last_line2:
-            self._last_line2 = text
-            self.enqueue(build_message(2, text, quiet=True, source="notice"))
+            cmd = build_message(2, text, quiet=True, source="notice")
+            # Atomic check-and-put: an explicit line-2 command enqueued
+            # between the pre-check and here must win, not be coalesced
+            # away.  On a lost race, leave _last_line2 unchanged — the
+            # rotation has moved on, so this exact text may never come
+            # around again, but a stale _last_line2 guarantees a later
+            # tick sees a difference and updates the display.
+            if self._queue.put_unless_pending(cmd, "line:2"):
+                self._last_line2 = text
 
 
 def open_serial(config: Config) -> serial.Serial:
