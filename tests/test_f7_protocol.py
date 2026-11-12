@@ -61,11 +61,20 @@ class TestBuildMessage:
         assert len(cmd.payloads) == 1
         assert "t=0" in cmd.payloads[0]
 
-    def test_generic_text(self):
+    def test_generic_text_leaves_backlight_alone(self):
+        """Generic text must not carry b=.  SerialIO re-attaches whatever
+        backlight is in effect; hard-coding b=1 here turned it back on at
+        every clock tick, so an explicit "off" could never stick."""
         cmd = build_message(2, "Hello World")
         assert len(cmd.payloads) == 1
-        assert "b=1 c=1" in cmd.payloads[0]
+        assert "b=" not in cmd.payloads[0]
+        assert "c=1" in cmd.payloads[0]
         assert "2=Hello World" in cmd.payloads[0]
+
+    def test_alarm_state_keeps_its_own_backlight(self):
+        """ALARM_STATES values are deliberate — Armed Away goes dark."""
+        assert "b=0" in build_message(1, "Armed Away").payloads[0]
+        assert "b=1" in build_message(1, "Armed Stay").payloads[0]
 
     def test_quiet_flag(self):
         cmd = build_message(2, "test", quiet=True)
@@ -77,11 +86,14 @@ class TestBuildMessage:
 
 
 class TestBuildRawMessage:
-    def test_basic(self):
+    def test_basic_leaves_backlight_alone(self):
         cmd = build_raw_message(1, "Hello")
         assert len(cmd.payloads) == 1
-        assert "b=1" in cmd.payloads[0]
+        assert "b=" not in cmd.payloads[0]
         assert "1=Hello" in cmd.payloads[0]
+
+    def test_explicit_backlight_on(self):
+        assert "b=1" in build_raw_message(1, "Msg", backlight="1").payloads[0]
 
     def test_backlight_off(self):
         cmd = build_raw_message(1, "Msg", backlight="0")
