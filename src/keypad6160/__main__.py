@@ -33,6 +33,7 @@ def main() -> None:
     serial_io._notice_manager = notices
     mqtt_client = KeypadMqttClient(config, serial_io, notices=notices)
     serial_io.on_keypress = mqtt_client.publish_key_event
+    serial_io._on_initialized = mqtt_client.on_arduino_ready
     serial_io.start()
 
     # -- Signal handling ---------------------------------------------------
